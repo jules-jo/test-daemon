@@ -312,6 +312,7 @@ class RequestHandler:
             verb="handshake",
             extra={
                 "status": "ok",
+                "protocol_version": 1,
                 "daemon_version": "0.1.0",
                 "pid": os.getpid(),
             },
