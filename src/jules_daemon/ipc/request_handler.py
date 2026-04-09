@@ -186,6 +186,7 @@ class RequestHandler:
         self._config = config
         self._queue = CommandQueue(wiki_root=config.wiki_root)
         self._verb_dispatch: dict[str, _VerbHandler] = {
+            "handshake": self._handle_handshake,
             "queue": self._handle_queue,
             "run": self._handle_run,
             "status": self._handle_status,
@@ -293,6 +294,28 @@ class RequestHandler:
         )
 
     # -- Verb handlers --
+
+    def _handle_handshake(
+        self,
+        msg_id: str,
+        parsed: dict[str, Any],
+    ) -> MessageEnvelope:
+        """Handle the initial client handshake.
+
+        Returns daemon version, uptime, and status so the client can
+        verify compatibility.
+        """
+        import os
+
+        return _build_success_response(
+            msg_id=msg_id,
+            verb="handshake",
+            extra={
+                "status": "ok",
+                "daemon_version": "0.1.0",
+                "pid": os.getpid(),
+            },
+        )
 
     def _handle_queue(
         self,
