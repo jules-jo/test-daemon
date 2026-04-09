@@ -2,6 +2,7 @@
 
 Modules:
     command: Validated Pydantic model for SSH commands
+    credentials: SSH credential resolution (password auth support)
     reader: Non-blocking async SSH output reader
     buffer_reader: SSH output buffer reader for stale/interrupted sessions
     errors: SSH error hierarchy (transient vs permanent classification)
