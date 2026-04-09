@@ -402,13 +402,40 @@ class TestRequestHandlerWatchVerb:
 
 
 class TestRequestHandlerRunVerb:
-    """Tests for run verb handling."""
+    """Tests for run verb handling.
+
+    The run handler now implements the full confirmation flow:
+    CONFIRM_PROMPT -> CONFIRM_REPLY -> execute (or deny).
+    Tests simulate the multi-message exchange via mocked reader/writer.
+    """
 
     @pytest.mark.asyncio
-    async def test_run_returns_response(self, tmp_path: Path) -> None:
+    async def test_run_denied_returns_denied_status(
+        self, tmp_path: Path
+    ) -> None:
+        """When the user denies the confirmation, status is 'denied'."""
+        from jules_daemon.ipc.framing import encode_frame
+
         config = RequestHandlerConfig(wiki_root=tmp_path)
         handler = RequestHandler(config=config)
         client = _make_client()
+
+        # Build the deny reply that the reader will return
+        deny_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="deny-001",
+            timestamp="2026-04-09T12:00:01Z",
+            payload={"approved": False},
+        )
+        deny_frame = encode_frame(deny_reply)
+        # readexactly: first call returns 4-byte header,
+        # second call returns payload bytes
+        header_bytes = deny_frame[:4]
+        payload_bytes = deny_frame[4:]
+        client.reader.readexactly = AsyncMock(
+            side_effect=[header_bytes, payload_bytes]
+        )
+
         envelope = _make_request(payload={
             "verb": "run",
             "target_host": "staging.example.com",
@@ -420,7 +447,7 @@ class TestRequestHandlerRunVerb:
 
         assert response.msg_type == MessageType.RESPONSE
         assert response.payload["verb"] == "run"
-        assert response.payload["status"] == "accepted"
+        assert response.payload["status"] == "denied"
 
 
 # ---------------------------------------------------------------------------

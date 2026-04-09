@@ -264,11 +264,61 @@ class TestIntegrationValidationErrors:
 # ---------------------------------------------------------------------------
 
 
+async def _send_run_with_denial(
+    socket_path: Path,
+    envelope: MessageEnvelope,
+) -> MessageEnvelope:
+    """Send a run request, receive CONFIRM_PROMPT, deny it, get final response.
+
+    Exercises the full confirmation flow with a denial reply.
+    """
+    reader, writer = await asyncio.open_unix_connection(str(socket_path))
+    try:
+        # Send the run request
+        frame = encode_frame(envelope)
+        writer.write(frame)
+        await writer.drain()
+
+        # Read the CONFIRM_PROMPT from the daemon
+        header_bytes = await reader.readexactly(HEADER_SIZE)
+        payload_length = unpack_header(header_bytes)
+        payload_bytes = await reader.readexactly(payload_length)
+        prompt = decode_envelope(payload_bytes)
+        assert prompt.msg_type == MessageType.CONFIRM_PROMPT
+
+        # Send a CONFIRM_REPLY denying the command
+        deny_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id=prompt.msg_id,
+            timestamp="2026-04-09T12:00:01Z",
+            payload={"approved": False},
+        )
+        deny_frame = encode_frame(deny_reply)
+        writer.write(deny_frame)
+        await writer.drain()
+
+        # Read the final response
+        header_bytes = await reader.readexactly(HEADER_SIZE)
+        payload_length = unpack_header(header_bytes)
+        payload_bytes = await reader.readexactly(payload_length)
+        return decode_envelope(payload_bytes)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
 class TestIntegrationRun:
-    """End-to-end tests for the run verb through the full IPC stack."""
+    """End-to-end tests for the run verb through the full IPC stack.
+
+    The run verb now implements the confirmation flow: the daemon sends
+    a CONFIRM_PROMPT and waits for a CONFIRM_REPLY before executing.
+    These tests exercise the denial path (no actual SSH needed).
+    """
 
     @pytest.mark.asyncio
-    async def test_run_accepted(self, tmp_path: Path) -> None:
+    async def test_run_denied_returns_denied_status(
+        self, tmp_path: Path
+    ) -> None:
         handler_config = RequestHandlerConfig(wiki_root=tmp_path)
         handler = RequestHandler(config=handler_config)
         sock_path = _make_socket_path(tmp_path)
@@ -281,11 +331,11 @@ class TestIntegrationRun:
                 target_user="deploy",
                 natural_language="run the full regression suite",
             )
-            response = await _send_request(sock_path, request)
+            response = await _send_run_with_denial(sock_path, request)
 
             assert response.msg_type == MessageType.RESPONSE
             assert response.payload["verb"] == "run"
-            assert response.payload["status"] == "accepted"
+            assert response.payload["status"] == "denied"
 
 
 # ---------------------------------------------------------------------------

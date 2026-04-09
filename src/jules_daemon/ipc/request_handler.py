@@ -8,7 +8,8 @@ Each incoming ``MessageEnvelope`` is:
 3. On validation success: routes to the verb-specific handler:
    - **queue**: enqueues to the wiki-backed ``CommandQueue`` and returns
      an enqueue confirmation with queue_id and position.
-   - **run**: accepts the command for processing and returns acceptance.
+   - **run**: sends a CONFIRM_PROMPT to the CLI, waits for approval,
+     executes the command via SSH, and returns the result.
    - **status/watch/cancel/history**: returns a stub response (handlers
      are wired by the daemon lifecycle, not the IPC layer).
 
@@ -28,6 +29,8 @@ Architecture::
                         |
                   queue verb ----->  CommandQueue.enqueue() [via executor]
                         |               -> RESPONSE (enqueued confirmation)
+                  run verb ------> confirmation prompt -> SSH execution
+                        |               -> RESPONSE (result)
                   other verb ---->  stub RESPONSE (accepted)
 
 The handler never raises exceptions. All errors are captured and returned
@@ -55,13 +58,22 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-from collections.abc import Callable
+import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from jules_daemon.ipc.framing import MessageEnvelope, MessageType
+from jules_daemon.execution.run_pipeline import RunResult, execute_run
+from jules_daemon.ipc.framing import (
+    HEADER_SIZE,
+    MessageEnvelope,
+    MessageType,
+    decode_envelope,
+    encode_frame,
+    unpack_header,
+)
 from jules_daemon.ipc.request_validator import validate_request
 from jules_daemon.ipc.server import ClientConnection
 from jules_daemon.wiki.command_queue import CommandQueue
@@ -95,8 +107,15 @@ class RequestHandlerConfig:
 # Type aliases
 # ---------------------------------------------------------------------------
 
-# Verb handler signature: (msg_id, parsed_payload) -> awaitable envelope
+# Verb handler signature: (msg_id, parsed_payload) -> envelope
 _VerbHandler = Callable[[str, dict[str, Any]], MessageEnvelope]
+
+# Async verb handler that needs client access for multi-message flows
+# (confirmation prompts, streaming, etc.)
+_AsyncClientVerbHandler = Callable[
+    [str, dict[str, Any], ClientConnection],
+    Awaitable[MessageEnvelope],
+]
 
 
 # ---------------------------------------------------------------------------
@@ -188,11 +207,14 @@ class RequestHandler:
         self._verb_dispatch: dict[str, _VerbHandler] = {
             "handshake": self._handle_handshake,
             "queue": self._handle_queue,
-            "run": self._handle_run,
             "status": self._handle_status,
             "watch": self._handle_watch,
             "cancel": self._handle_cancel,
             "history": self._handle_history,
+        }
+        # Verbs that require async client access (multi-message flows)
+        self._async_client_dispatch: dict[str, _AsyncClientVerbHandler] = {
+            "run": self._handle_run,
         }
 
     async def handle_message(
@@ -270,6 +292,13 @@ class RequestHandler:
             envelope.msg_id,
             client.client_id,
         )
+
+        # Check for async client handlers first (multi-message flows)
+        async_handler = self._async_client_dispatch.get(verb)
+        if async_handler is not None:
+            return await async_handler(
+                envelope.msg_id, result.parsed_payload, client,
+            )
 
         handler = self._verb_dispatch.get(verb)
         if handler is None:
@@ -355,26 +384,236 @@ class RequestHandler:
             },
         )
 
-    def _handle_run(
+    async def _handle_run(
         self,
         msg_id: str,
         parsed: dict[str, Any],
+        client: ClientConnection,
     ) -> MessageEnvelope:
-        """Accept a run command.
+        """Execute a run command with confirmation and SSH execution.
 
-        The actual execution flow (LLM translation, SSH confirmation,
-        execution, monitoring) is handled by the daemon lifecycle,
-        not the IPC handler. Here we return acceptance.
+        Full flow:
+        1. Extract target host, user, port, and command from parsed payload
+        2. Send a CONFIRM_PROMPT to the CLI with the proposed command
+        3. Wait for the CLI to send a CONFIRM_REPLY (approve/deny)
+        4. If denied, return a denial response
+        5. If approved, execute the command via SSH (paramiko)
+        6. Write results to the wiki (current-run -> history)
+        7. Return the execution result to the CLI
+
+        For explicit commands (user typed the exact command), the
+        ``natural_language`` field is used directly as the SSH command
+        without LLM translation.
+
+        Args:
+            msg_id: Correlation ID from the original request.
+            parsed: Validated payload with target_host, target_user,
+                natural_language, and optional target_port.
+            client: Connection context with reader/writer for the
+                confirmation exchange.
+
+        Returns:
+            RESPONSE envelope with execution results or denial status.
         """
+        target_host = parsed.get("target_host", "")
+        target_user = parsed.get("target_user", "")
+        natural_language = parsed.get("natural_language", "")
+        target_port = parsed.get("target_port", 22)
+
+        # Use the natural_language input directly as the SSH command
+        # (explicit command path -- no LLM translation needed)
+        proposed_command = natural_language
+
+        # Step 1: Send CONFIRM_PROMPT to the CLI
+        confirm_msg_id = f"confirm-{uuid.uuid4().hex[:12]}"
+        confirm_prompt = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_PROMPT,
+            msg_id=confirm_msg_id,
+            timestamp=_now_iso(),
+            payload={
+                "proposed_command": proposed_command,
+                "target_host": target_host,
+                "target_user": target_user,
+                "target_port": target_port,
+                "original_msg_id": msg_id,
+                "message": (
+                    f"Execute on {target_user}@{target_host}:{target_port}?\n"
+                    f"  $ {proposed_command}"
+                ),
+            },
+        )
+
+        try:
+            await self._send_envelope(client, confirm_prompt)
+        except Exception as exc:
+            logger.warning(
+                "Failed to send confirmation prompt for msg_id=%s: %s",
+                msg_id,
+                exc,
+            )
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary="Failed to send confirmation prompt to CLI",
+                validation_errors=[],
+            )
+
+        # Step 2: Wait for CONFIRM_REPLY from the CLI
+        try:
+            reply = await self._read_envelope(
+                client, timeout=120.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Confirmation timeout for msg_id=%s from %s",
+                msg_id,
+                client.client_id,
+            )
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary="Confirmation timed out (120s)",
+                validation_errors=[],
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to read confirmation reply for msg_id=%s: %s",
+                msg_id,
+                exc,
+            )
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary="Failed to read confirmation reply from CLI",
+                validation_errors=[],
+            )
+
+        if reply is None:
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary="CLI disconnected before confirming",
+                validation_errors=[],
+            )
+
+        # Step 3: Check approval
+        if reply.msg_type != MessageType.CONFIRM_REPLY:
+            logger.warning(
+                "Expected CONFIRM_REPLY but got %s for msg_id=%s",
+                reply.msg_type.value,
+                msg_id,
+            )
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary=(
+                    f"Expected confirm_reply, got {reply.msg_type.value}"
+                ),
+                validation_errors=[],
+            )
+
+        approved = reply.payload.get("approved", False)
+        if not approved:
+            logger.info(
+                "Run denied by user for msg_id=%s (host=%s)",
+                msg_id,
+                target_host,
+            )
+            return _build_success_response(
+                msg_id=msg_id,
+                verb="run",
+                extra={
+                    "status": "denied",
+                    "target_host": target_host,
+                    "message": "Command execution denied by user",
+                },
+            )
+
+        # Step 4: Execute the command via SSH
+        logger.info(
+            "Run approved for msg_id=%s: executing '%s' on %s@%s:%d",
+            msg_id,
+            proposed_command[:80],
+            target_user,
+            target_host,
+            target_port,
+        )
+
+        result: RunResult = await execute_run(
+            target_host=target_host,
+            target_user=target_user,
+            command=proposed_command,
+            target_port=target_port,
+            wiki_root=self._config.wiki_root,
+        )
+
+        # Step 5: Return the result
+        extra: dict[str, Any] = {
+            "status": "completed" if result.success else "failed",
+            "run_id": result.run_id,
+            "target_host": result.target_host,
+            "command": result.command,
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "duration_seconds": result.duration_seconds,
+        }
+        if result.error is not None:
+            extra["error_detail"] = result.error
+
         return _build_success_response(
             msg_id=msg_id,
             verb="run",
-            extra={
-                "status": "accepted",
-                "target_host": parsed.get("target_host"),
-                "natural_language": parsed.get("natural_language"),
-            },
+            extra=extra,
         )
+
+    # -- Client I/O helpers for multi-message flows --
+
+    @staticmethod
+    async def _send_envelope(
+        client: ClientConnection,
+        envelope: MessageEnvelope,
+    ) -> None:
+        """Encode and send a framed envelope to the client.
+
+        Args:
+            client: The client connection with writer.
+            envelope: The envelope to send.
+
+        Raises:
+            OSError: On connection failure.
+        """
+        frame = encode_frame(envelope)
+        client.writer.write(frame)
+        await client.writer.drain()
+
+    @staticmethod
+    async def _read_envelope(
+        client: ClientConnection,
+        *,
+        timeout: float = 30.0,
+    ) -> MessageEnvelope | None:
+        """Read a single framed envelope from the client.
+
+        Args:
+            client: The client connection with reader.
+            timeout: Maximum seconds to wait.
+
+        Returns:
+            The decoded MessageEnvelope, or None on EOF.
+
+        Raises:
+            asyncio.TimeoutError: If no message arrives within timeout.
+        """
+        try:
+            header_bytes = await asyncio.wait_for(
+                client.reader.readexactly(HEADER_SIZE),
+                timeout=timeout,
+            )
+        except asyncio.IncompleteReadError:
+            return None
+
+        payload_length = unpack_header(header_bytes)
+        payload_bytes = await asyncio.wait_for(
+            client.reader.readexactly(payload_length),
+            timeout=timeout,
+        )
+        return decode_envelope(payload_bytes)
 
     def _handle_status(
         self,
