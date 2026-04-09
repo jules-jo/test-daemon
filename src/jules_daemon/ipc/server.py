@@ -334,16 +334,33 @@ class SocketServer:
                 )
                 socket_path.unlink()
 
-            # Start the async Unix server -- the accept callback delegates
-            # to the ConnectionDispatcher for explicit task management
-            self._server = await asyncio.start_unix_server(
-                self._on_client_connected,
-                path=str(socket_path),
-                backlog=self._config.backlog,
-            )
+            # Start the async server -- Unix socket on Linux/macOS,
+            # TCP localhost on Windows (which lacks Unix sockets)
+            import sys
 
-            # Set restrictive permissions (owner read/write only)
-            os.chmod(socket_path, _SOCKET_PERMISSIONS)
+            if sys.platform == "win32":
+                # Windows: use TCP on localhost with a port derived from
+                # the socket path hash to avoid collisions
+                port = 49152 + (hash(str(socket_path)) % 16383)
+                self._server = await asyncio.start_server(
+                    self._on_client_connected,
+                    host="127.0.0.1",
+                    port=port,
+                    backlog=self._config.backlog,
+                )
+                # Write the port to the socket_path file so clients
+                # can discover it
+                socket_path.parent.mkdir(parents=True, exist_ok=True)
+                socket_path.write_text(str(port))
+                self._win_port = port
+            else:
+                self._server = await asyncio.start_unix_server(
+                    self._on_client_connected,
+                    path=str(socket_path),
+                    backlog=self._config.backlog,
+                )
+                # Set restrictive permissions (owner read/write only)
+                os.chmod(socket_path, _SOCKET_PERMISSIONS)
 
             self._state = ServerState.RUNNING
             logger.info(

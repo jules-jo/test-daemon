@@ -484,13 +484,28 @@ class ClientConnection:
 
         self._resolved_path = socket_path
 
-        # Step 2: Establish Unix socket connection
+        # Step 2: Establish connection (Unix socket or TCP on Windows)
         self._state = ConnectionState.CONNECTING
         logger.debug("Connecting to daemon at %s", socket_path)
 
         try:
+            import sys
+
+            if sys.platform == "win32":
+                # Windows: read TCP port from the socket path file
+                try:
+                    port = int(socket_path.read_text().strip())
+                except (FileNotFoundError, ValueError) as read_exc:
+                    self._state = ConnectionState.DISCONNECTED
+                    return _failure_result(
+                        f"Daemon not running (no port file at {socket_path}): {read_exc}"
+                    )
+                connect_coro = asyncio.open_connection("127.0.0.1", port)
+            else:
+                connect_coro = asyncio.open_unix_connection(str(socket_path))
+
             reader, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(str(socket_path)),
+                connect_coro,
                 timeout=self._config.connect_timeout,
             )
         except (OSError, asyncio.TimeoutError) as exc:
