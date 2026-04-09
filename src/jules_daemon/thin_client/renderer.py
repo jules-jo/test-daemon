@@ -86,7 +86,7 @@ def render_confirm_prompt(envelope: MessageEnvelope) -> str:
         Formatted confirmation display text.
     """
     payload = envelope.payload
-    command = payload.get("command", "<no command>")
+    command = payload.get("proposed_command") or payload.get("command") or "<no command>"
     target_host = payload.get("target_host", "<unknown>")
     target_user = payload.get("target_user", "<unknown>")
     risk_level = payload.get("risk_level", "unknown")
