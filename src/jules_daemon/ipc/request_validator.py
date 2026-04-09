@@ -48,7 +48,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 _VALID_VERBS: frozenset[str] = frozenset({
-    "status", "watch", "run", "queue", "cancel", "history",
+    "status", "watch", "run", "queue", "cancel", "history", "handshake",
 })
 
 # Valid output formats for the watch verb
