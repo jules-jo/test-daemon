@@ -199,7 +199,10 @@ def _try_xdg_runtime(config: DiscoveryConfig) -> Path | None:
 
 
 def _tmpdir_fallback(config: DiscoveryConfig) -> Path:
-    """Build the /tmp/jules-{uid}/daemon.sock fallback path.
+    """Build a per-user fallback socket path in the temp directory.
+
+    On Linux/macOS: /tmp/jules-{uid}/daemon.sock
+    On Windows: %TEMP%/jules-{username}/daemon.sock
 
     Always returns a path. The directory and file may not exist.
 
@@ -207,10 +210,15 @@ def _tmpdir_fallback(config: DiscoveryConfig) -> Path:
         config: Discovery configuration with subdirectory and filename.
 
     Returns:
-        Fallback socket path using the current user's UID.
+        Fallback socket path namespaced by user identity.
     """
-    uid = os.getuid()
-    return Path(f"/tmp/{config.subdirectory}-{uid}") / config.socket_filename
+    if hasattr(os, "getuid"):
+        user_id = str(os.getuid())
+    else:
+        user_id = os.environ.get("USERNAME", os.environ.get("USER", "default"))
+    import tempfile
+    tmp_base = Path(tempfile.gettempdir())
+    return tmp_base / f"{config.subdirectory}-{user_id}" / config.socket_filename
 
 
 # ---------------------------------------------------------------------------
