@@ -132,7 +132,7 @@ class TestThinClientConfig:
         config = ThinClientConfig()
         assert config.socket_path is None
         assert config.connect_timeout == 5.0
-        assert config.receive_timeout == 30.0
+        assert config.receive_timeout == 7200.0
         assert config.stream_timeout == 10.0
 
     def test_custom_values(self):

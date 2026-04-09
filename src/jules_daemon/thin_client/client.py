@@ -87,7 +87,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_DEFAULT_RECEIVE_TIMEOUT: float = 30.0
+_DEFAULT_RECEIVE_TIMEOUT: float = 7200.0  # 2 hours: must outlast the longest test run
 """Maximum seconds to wait for a daemon response."""
 
 _STREAM_READ_TIMEOUT: float = 10.0
