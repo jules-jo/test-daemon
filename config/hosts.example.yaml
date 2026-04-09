@@ -1,0 +1,45 @@
+# Jules Daemon -- SSH Target Hosts Configuration
+#
+# Copy this file to hosts.yaml and edit to match your environment.
+# The daemon reads SSH target parameters from CLI commands, not from
+# this file. This file serves as documentation and a template for
+# integration scripts that construct CLI commands programmatically.
+#
+# All secrets (SSH keys, API keys) must come from environment variables
+# or the SSH agent. Never hardcode credentials in this file.
+
+hosts:
+  # CI server for running integration tests
+  - name: ci-server
+    host: ci.example.com
+    user: deploy
+    port: 22
+    # key_path: /home/deploy/.ssh/id_ed25519  # optional, uses SSH agent by default
+    description: "Primary CI server for integration test suites"
+
+  # Staging environment
+  - name: staging
+    host: staging.example.com
+    user: testrunner
+    port: 22
+    description: "Staging environment for pre-production validation"
+
+  # Production canary (read-only test execution)
+  - name: prod-canary
+    host: canary.prod.example.com
+    user: readonly
+    port: 2222
+    description: "Production canary node for smoke tests only"
+
+# Environment variables used by the daemon:
+#
+# Required for LLM features:
+#   JULES_LLM_BASE_URL      -- Dataiku Mesh endpoint URL
+#   JULES_LLM_API_KEY       -- Dataiku API key
+#   JULES_LLM_DEFAULT_MODEL -- Model in provider:connection:model format
+#
+# Optional:
+#   JULES_LLM_TIMEOUT        -- HTTP timeout in seconds (default: 120)
+#   JULES_LLM_MAX_RETRIES    -- Retry count (default: 2)
+#   JULES_LLM_VERIFY_SSL     -- SSL verification toggle (default: true)
+#   JULES_SOCKET_PATH         -- Override daemon socket path

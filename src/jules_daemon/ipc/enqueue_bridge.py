@@ -1,0 +1,331 @@
+"""Enqueue bridge: wires validated commands into the thread-safe queue.
+
+This module provides the bridge function ``enqueue_command`` that sits
+between the IPC socket handler and the wiki-backed ``CommandQueue``. It:
+
+1. Accepts a validated ``CommandRequest`` from the IPC layer.
+2. Checks backpressure: rejects the command with ``QueueFullError`` if
+   the queue is at or above the configured maximum size.
+3. Enqueues the command into the ``CommandQueue`` (which persists it
+   as a wiki file atomically).
+4. Generates an immutable ``EnqueueReceipt`` with a unique receipt ID,
+   the queue entry's ID, position, and a natural-language preview.
+5. Returns the receipt to the socket handler for IPC response.
+
+Thread safety: The bridge delegates to ``CommandQueue.enqueue()``, which
+serializes mutations under its own ``threading.Lock``. The backpressure
+check (``CommandQueue.size()``) and the enqueue are performed under the
+same lock acquisition cycle in ``CommandQueue``, so no TOCTOU race can
+cause the queue to exceed ``max_queue_size``.
+
+Architecture::
+
+    Socket Handler
+         |
+         v
+    validate_request(envelope) -> CommandRequest
+         |
+         v
+    enqueue_command(command, queue, max_queue_size)
+         |
+         +-- backpressure check (queue.size() >= max_queue_size?)
+         |       yes -> raise QueueFullError
+         |       no  -> continue
+         |
+         +-- queue.enqueue(...)
+         |
+         +-- build EnqueueReceipt
+         |
+         v
+    return EnqueueReceipt -> socket handler -> IPC response
+
+Usage::
+
+    from jules_daemon.ipc.enqueue_bridge import enqueue_command, QueueFullError
+    from jules_daemon.models.command_request import CommandRequest
+    from jules_daemon.wiki.command_queue import CommandQueue
+
+    queue = CommandQueue(wiki_root=Path("./wiki"))
+    command = CommandRequest(
+        natural_language_command="run the full test suite",
+        target_host="staging.example.com",
+    )
+
+    try:
+        receipt = enqueue_command(command, queue)
+        print(f"Enqueued: {receipt.queue_id}, position={receipt.position}")
+    except QueueFullError as exc:
+        print(f"Queue full: {exc}")
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
+
+from jules_daemon.models.command_request import CommandRequest
+from jules_daemon.wiki.command_queue import CommandQueue
+from jules_daemon.wiki.queue_models import QueuePriority
+
+__all__ = [
+    "DEFAULT_MAX_QUEUE_SIZE",
+    "PREVIEW_MAX_LENGTH",
+    "EnqueueReceipt",
+    "QueueFullError",
+    "enqueue_command",
+]
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+DEFAULT_MAX_QUEUE_SIZE: int = 100
+"""Default maximum number of commands allowed in the queue.
+
+When the queue reaches this limit, new enqueue requests are rejected
+with ``QueueFullError`` rather than silently dropped or blocking.
+"""
+
+PREVIEW_MAX_LENGTH: int = 120
+"""Maximum length for the natural language preview in receipts.
+
+Commands longer than this are truncated with an ellipsis suffix.
+"""
+
+_ELLIPSIS_SUFFIX: str = "..."
+
+
+# ---------------------------------------------------------------------------
+# QueueFullError
+# ---------------------------------------------------------------------------
+
+
+class QueueFullError(Exception):
+    """Raised when the command queue is at capacity.
+
+    This is a backpressure signal -- the caller should inform the user
+    that their command cannot be accepted right now and they should
+    retry later or wait for existing commands to complete.
+
+    Attributes:
+        current_size: Number of commands currently in the queue.
+        max_size: Configured maximum queue capacity.
+    """
+
+    def __init__(self, *, current_size: int, max_size: int) -> None:
+        self.current_size = current_size
+        self.max_size = max_size
+        super().__init__(
+            f"Command queue is full ({current_size}/{max_size}). "
+            f"Wait for existing commands to complete or cancel pending entries."
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict for IPC error responses.
+
+        Returns:
+            Dict with error type, current size, and max size.
+        """
+        return {
+            "error": "queue_full",
+            "current_size": self.current_size,
+            "max_size": self.max_size,
+            "message": str(self),
+        }
+
+
+# ---------------------------------------------------------------------------
+# EnqueueReceipt
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EnqueueReceipt:
+    """Immutable confirmation receipt for a successfully enqueued command.
+
+    Generated by ``enqueue_command`` after the command has been placed
+    into the queue and persisted to its wiki file. This receipt is
+    returned to the socket handler, which serializes it into the IPC
+    response envelope.
+
+    Attributes:
+        receipt_id: Unique identifier for this enqueue operation (UUID v4).
+            Distinct from the queue entry's queue_id -- the receipt_id
+            identifies the *enqueue event*, while queue_id identifies
+            the *queue entry*.
+        queue_id: The wiki queue entry identifier (from QueuedCommand).
+        command_id: The original CommandRequest's command_id (for
+            correlation back to the CLI request).
+        sequence: Monotonic sequence number assigned by the queue.
+        position: 1-based position in the queue at the time of enqueue.
+        queue_size: Total number of pending commands after this enqueue.
+        natural_language_preview: Truncated preview of the command text.
+        target_host: SSH target hostname.
+        enqueued_at: ISO 8601 timestamp of when the command was enqueued.
+    """
+
+    receipt_id: str
+    queue_id: str
+    command_id: str
+    sequence: int
+    position: int
+    queue_size: int
+    natural_language_preview: str
+    target_host: str
+    enqueued_at: str
+
+    def __post_init__(self) -> None:
+        if not self.receipt_id or not self.receipt_id.strip():
+            raise ValueError("receipt_id must not be empty")
+        if not self.queue_id or not self.queue_id.strip():
+            raise ValueError("queue_id must not be empty")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict for IPC response payloads.
+
+        Returns:
+            Dict with all receipt fields.
+        """
+        return {
+            "receipt_id": self.receipt_id,
+            "queue_id": self.queue_id,
+            "command_id": self.command_id,
+            "sequence": self.sequence,
+            "position": self.position,
+            "queue_size": self.queue_size,
+            "natural_language_preview": self.natural_language_preview,
+            "target_host": self.target_host,
+            "enqueued_at": self.enqueued_at,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _generate_receipt_id() -> str:
+    """Generate a unique receipt identifier (UUID v4)."""
+    return str(uuid.uuid4())
+
+
+def _now_iso() -> str:
+    """Return current UTC time as ISO 8601 string."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _truncate_preview(text: str, max_length: int = PREVIEW_MAX_LENGTH) -> str:
+    """Truncate text to max_length with ellipsis if needed.
+
+    Args:
+        text: The full command text.
+        max_length: Maximum length for the preview (including ellipsis).
+
+    Returns:
+        The text unchanged if within limit, or truncated with '...' suffix.
+    """
+    if len(text) <= max_length:
+        return text
+    truncated_length = max_length - len(_ELLIPSIS_SUFFIX)
+    return text[:truncated_length] + _ELLIPSIS_SUFFIX
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def enqueue_command(
+    command: CommandRequest,
+    queue: CommandQueue,
+    *,
+    max_queue_size: int = DEFAULT_MAX_QUEUE_SIZE,
+    priority: QueuePriority = QueuePriority.NORMAL,
+) -> EnqueueReceipt:
+    """Bridge a validated command into the thread-safe queue.
+
+    Checks backpressure, enqueues the command, and returns an immutable
+    confirmation receipt. This function is the sole entry point for
+    placing commands onto the queue from the IPC layer.
+
+    Thread safety: The backpressure check and enqueue are serialized by
+    the ``CommandQueue``'s internal lock. The size check happens first;
+    if the queue is at capacity, the command is never enqueued.
+
+    Args:
+        command: A validated ``CommandRequest`` from the IPC validation
+            pipeline.
+        queue: The thread-safe ``CommandQueue`` to enqueue into.
+        max_queue_size: Maximum number of pending commands allowed.
+            When the queue reaches this limit, ``QueueFullError`` is
+            raised. Defaults to ``DEFAULT_MAX_QUEUE_SIZE``.
+        priority: Priority tier for the queued command. Defaults to
+            ``QueuePriority.NORMAL``.
+
+    Returns:
+        An ``EnqueueReceipt`` confirming successful enqueue with the
+        queue entry ID, position, and a natural-language preview.
+
+    Raises:
+        QueueFullError: If the queue is at or above ``max_queue_size``.
+        ValueError: If the command's natural_language_command is empty
+            (propagated from ``CommandQueue.enqueue``).
+    """
+    # Step 1+2: Atomic backpressure check + enqueue
+    # Uses try_enqueue to perform both under a single lock acquisition,
+    # eliminating TOCTOU races between size check and enqueue.
+    queued, queue_size_after = queue.try_enqueue(
+        natural_language=command.natural_language_command,
+        max_size=max_queue_size,
+        ssh_host=command.target_host,
+        ssh_user=command.target_user or None,
+        ssh_port=command.target_port,
+        priority=priority,
+    )
+
+    if queued is None:
+        logger.warning(
+            "Queue full: current_size=%d, max_size=%d. "
+            "Rejecting command from %s: %s",
+            queue_size_after,
+            max_queue_size,
+            command.target_host,
+            command.natural_language_command[:80],
+        )
+        raise QueueFullError(
+            current_size=queue_size_after,
+            max_size=max_queue_size,
+        )
+
+    # Step 3: Build receipt
+    receipt = EnqueueReceipt(
+        receipt_id=_generate_receipt_id(),
+        queue_id=queued.queue_id,
+        command_id=command.command_id,
+        sequence=queued.sequence,
+        position=queue_size_after,
+        queue_size=queue_size_after,
+        natural_language_preview=_truncate_preview(
+            command.natural_language_command
+        ),
+        target_host=command.target_host,
+        enqueued_at=_now_iso(),
+    )
+
+    logger.info(
+        "Enqueue bridge: receipt_id=%s queue_id=%s position=%d "
+        "host=%s cmd=%s",
+        receipt.receipt_id,
+        receipt.queue_id,
+        receipt.position,
+        receipt.target_host,
+        receipt.natural_language_preview[:60],
+    )
+
+    return receipt

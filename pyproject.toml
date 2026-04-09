@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jules-daemon"
+version = "0.1.0"
+description = "Single-user background daemon for remote test execution with wiki-based persistence"
+requires-python = ">=3.12"
+dependencies = [
+    "pyyaml>=6.0",
+    "openai>=1.30",
+    "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+]
+
+[project.scripts]
+jules-daemon = "jules_daemon.__main__:main"
+jules = "jules_daemon.cli_main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jules_daemon"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.coverage.run]
+source = ["jules_daemon"]
