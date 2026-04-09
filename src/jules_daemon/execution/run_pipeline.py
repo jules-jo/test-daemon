@@ -174,6 +174,10 @@ def _execute_via_paramiko(
 
     if credential is not None:
         connect_kwargs["password"] = credential.password
+        # When using password auth, disable key-based auth to avoid
+        # paramiko trying (and failing) public key first
+        connect_kwargs["allow_agent"] = False
+        connect_kwargs["look_for_keys"] = False
         # If the credential provides a username override, use it
         if credential.username is not None:
             connect_kwargs["username"] = credential.username
