@@ -211,8 +211,13 @@ async def _run_daemon(
         shutdown_event.set()
 
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, _signal_handler, sig)
+    if sys.platform != "win32":
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, _signal_handler, sig)
+    else:
+        # Windows: use signal.signal() instead of loop.add_signal_handler()
+        signal.signal(signal.SIGINT, lambda s, f: _signal_handler(s))
+        signal.signal(signal.SIGTERM, lambda s, f: _signal_handler(s))
 
     # Step 6: Start server and wait for shutdown
     async with server:
