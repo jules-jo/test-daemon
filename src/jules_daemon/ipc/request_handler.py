@@ -65,6 +65,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from jules_daemon.execution.collision_check import (
+    check_remote_processes,
+    format_collision_warning,
+)
 from jules_daemon.execution.run_pipeline import RunResult, execute_run
 from jules_daemon.ipc.framing import (
     HEADER_SIZE,
@@ -76,6 +80,8 @@ from jules_daemon.ipc.framing import (
 )
 from jules_daemon.ipc.request_validator import validate_request
 from jules_daemon.ipc.server import ClientConnection
+from jules_daemon.ssh.credentials import resolve_ssh_credentials
+from jules_daemon.wiki import current_run as current_run_io
 from jules_daemon.wiki.command_queue import CommandQueue
 
 __all__ = [
@@ -204,6 +210,8 @@ class RequestHandler:
     def __init__(self, *, config: RequestHandlerConfig) -> None:
         self._config = config
         self._queue = CommandQueue(wiki_root=config.wiki_root)
+        self._current_task: asyncio.Task[RunResult] | None = None
+        self._current_run_id: str | None = None
         self._verb_dispatch: dict[str, _VerbHandler] = {
             "handshake": self._handle_handshake,
             "queue": self._handle_queue,
@@ -390,20 +398,17 @@ class RequestHandler:
         parsed: dict[str, Any],
         client: ClientConnection,
     ) -> MessageEnvelope:
-        """Execute a run command with confirmation and SSH execution.
+        """Execute a run command with confirmation, collision check, and background execution.
 
         Full flow:
         1. Extract target host, user, port, and command from parsed payload
         2. Send a CONFIRM_PROMPT to the CLI with the proposed command
         3. Wait for the CLI to send a CONFIRM_REPLY (approve/deny)
         4. If denied, return a denial response
-        5. If approved, execute the command via SSH (paramiko)
-        6. Write results to the wiki (current-run -> history)
-        7. Return the execution result to the CLI
-
-        For explicit commands (user typed the exact command), the
-        ``natural_language`` field is used directly as the SSH command
-        without LLM translation.
+        5. If approved, check for running test processes on the remote host
+        6. If processes found, warn the user and ask for a second confirmation
+        7. Spawn execute_run() as a background asyncio task
+        8. Return a "started" response immediately with the run_id
 
         Args:
             msg_id: Correlation ID from the original request.
@@ -413,7 +418,7 @@ class RequestHandler:
                 confirmation exchange.
 
         Returns:
-            RESPONSE envelope with execution results or denial status.
+            RESPONSE envelope with started status or denial.
         """
         target_host = parsed.get("target_host", "")
         target_user = parsed.get("target_user", "")
@@ -524,9 +529,8 @@ class RequestHandler:
                 },
             )
 
-        # Step 4: Send "connecting" status to CLI before SSH execution
         logger.info(
-            "Run approved for msg_id=%s: executing '%s' on %s@%s:%d",
+            "Run approved for msg_id=%s: '%s' on %s@%s:%d",
             msg_id,
             proposed_command[:80],
             target_user,
@@ -534,6 +538,110 @@ class RequestHandler:
             target_port,
         )
 
+        # Step 4: Collision detection -- check for running test processes
+        credential = resolve_ssh_credentials(target_host)
+        remote_processes = await check_remote_processes(
+            host=target_host,
+            port=target_port,
+            username=target_user,
+            credential=credential,
+        )
+
+        if remote_processes:
+            warning_text = format_collision_warning(remote_processes)
+            collision_msg = MessageEnvelope(
+                msg_type=MessageType.STREAM,
+                msg_id=f"collision-{uuid.uuid4().hex[:12]}",
+                timestamp=_now_iso(),
+                payload={
+                    "line": (
+                        warning_text
+                        + "Do you want to proceed anyway? "
+                        "Waiting for confirmation...\n"
+                    ),
+                    "is_end": False,
+                },
+            )
+            try:
+                await self._send_envelope(client, collision_msg)
+            except Exception:
+                pass  # Best effort
+
+            # Ask for a second confirmation
+            collision_confirm = MessageEnvelope(
+                msg_type=MessageType.CONFIRM_PROMPT,
+                msg_id=f"collision-confirm-{uuid.uuid4().hex[:12]}",
+                timestamp=_now_iso(),
+                payload={
+                    "proposed_command": proposed_command,
+                    "target_host": target_host,
+                    "original_msg_id": msg_id,
+                    "message": (
+                        "Test processes detected on remote host. "
+                        "Proceed anyway?"
+                    ),
+                },
+            )
+            try:
+                await self._send_envelope(client, collision_confirm)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to send collision confirmation for msg_id=%s: %s",
+                    msg_id,
+                    exc,
+                )
+                return _build_error_response(
+                    msg_id=msg_id,
+                    error_summary="Failed to send collision confirmation",
+                    validation_errors=[],
+                )
+
+            try:
+                collision_reply = await self._read_envelope(
+                    client, timeout=120.0,
+                )
+            except asyncio.TimeoutError:
+                return _build_error_response(
+                    msg_id=msg_id,
+                    error_summary="Collision confirmation timed out (120s)",
+                    validation_errors=[],
+                )
+            except Exception:
+                return _build_error_response(
+                    msg_id=msg_id,
+                    error_summary="Failed to read collision confirmation",
+                    validation_errors=[],
+                )
+
+            if collision_reply is None:
+                return _build_error_response(
+                    msg_id=msg_id,
+                    error_summary="CLI disconnected during collision check",
+                    validation_errors=[],
+                )
+
+            collision_approved = collision_reply.payload.get("approved", False)
+            if not collision_approved:
+                logger.info(
+                    "Run denied after collision warning for msg_id=%s",
+                    msg_id,
+                )
+                return _build_success_response(
+                    msg_id=msg_id,
+                    verb="run",
+                    extra={
+                        "status": "denied",
+                        "target_host": target_host,
+                        "message": (
+                            "Command execution denied after collision warning"
+                        ),
+                    },
+                )
+
+        # Step 5: Generate run_id and spawn background task
+        run_id = f"run-{uuid.uuid4().hex[:12]}"
+
+        # Send "connecting" status to CLI
         connecting_msg = MessageEnvelope(
             msg_type=MessageType.STREAM,
             msg_id=f"status-{uuid.uuid4().hex[:12]}",
@@ -542,7 +650,7 @@ class RequestHandler:
                 "line": (
                     f"\nConnecting to {target_user}@{target_host}:{target_port}...\n"
                     f"Executing: {proposed_command}\n"
-                    f"Test is running. Waiting for results...\n"
+                    f"Test started. Use 'status' to check progress.\n"
                 ),
                 "is_end": False,
             },
@@ -552,33 +660,116 @@ class RequestHandler:
         except Exception:
             pass  # Best effort -- don't fail the run if status send fails
 
-        result: RunResult = await execute_run(
-            target_host=target_host,
-            target_user=target_user,
-            command=proposed_command,
-            target_port=target_port,
-            wiki_root=self._config.wiki_root,
+        # Spawn execute_run as a background task
+        self._current_run_id = run_id
+        self._current_task = asyncio.create_task(
+            self._background_execute(
+                target_host=target_host,
+                target_user=target_user,
+                command=proposed_command,
+                target_port=target_port,
+            ),
+            name=f"run-{run_id}",
         )
 
-        # Step 5: Return the result
-        extra: dict[str, Any] = {
-            "status": "completed" if result.success else "failed",
-            "run_id": result.run_id,
-            "target_host": result.target_host,
-            "command": result.command,
-            "exit_code": result.exit_code,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "duration_seconds": result.duration_seconds,
-        }
-        if result.error is not None:
-            extra["error_detail"] = result.error
-
+        # Step 6: Return "started" response immediately
         return _build_success_response(
             msg_id=msg_id,
             verb="run",
-            extra=extra,
+            extra={
+                "status": "started",
+                "run_id": run_id,
+                "target_host": target_host,
+                "command": proposed_command,
+                "message": "Test started. Use 'status' to check progress.",
+            },
         )
+
+    async def _background_execute(
+        self,
+        *,
+        target_host: str,
+        target_user: str,
+        command: str,
+        target_port: int,
+    ) -> RunResult:
+        """Run execute_run in the background, handling exceptions gracefully.
+
+        On failure, writes FAILED state to the wiki so the status command
+        can report it. Never allows exceptions to crash the daemon.
+
+        Args:
+            target_host: Remote hostname or IP address.
+            target_user: SSH username.
+            command: Shell command string to execute.
+            target_port: SSH port number.
+
+        Returns:
+            RunResult from the execution pipeline.
+        """
+        try:
+            result = await execute_run(
+                target_host=target_host,
+                target_user=target_user,
+                command=command,
+                target_port=target_port,
+                wiki_root=self._config.wiki_root,
+            )
+            logger.info(
+                "Background run completed: run_id=%s success=%s",
+                result.run_id,
+                result.success,
+            )
+            return result
+        except Exception as exc:
+            logger.error(
+                "Background run failed with unexpected error: %s",
+                exc,
+                exc_info=True,
+            )
+            # Write FAILED state to wiki so status can report it
+            try:
+                from jules_daemon.wiki.models import (
+                    Command as WikiCommand,
+                    CurrentRun,
+                    ProcessIDs,
+                    Progress,
+                    RunStatus,
+                    SSHTarget,
+                )
+                import os
+
+                failed_run = CurrentRun(
+                    status=RunStatus.FAILED,
+                    ssh_target=SSHTarget(
+                        host=target_host,
+                        user=target_user,
+                        port=target_port,
+                    ),
+                    command=WikiCommand(
+                        natural_language=command,
+                        resolved_shell=command,
+                    ),
+                    pids=ProcessIDs(daemon=os.getpid()),
+                    error=str(exc),
+                )
+                current_run_io.write(self._config.wiki_root, failed_run)
+            except Exception as wiki_exc:
+                logger.error(
+                    "Failed to write FAILED state to wiki: %s",
+                    wiki_exc,
+                )
+
+            # Return a failed result rather than propagating the exception
+            from datetime import datetime, timezone
+            return RunResult(
+                success=False,
+                run_id=self._current_run_id or "",
+                command=command,
+                target_host=target_host,
+                target_user=target_user,
+                error=str(exc),
+            )
 
     # -- Client I/O helpers for multi-message flows --
 
@@ -640,15 +831,110 @@ class RequestHandler:
     ) -> MessageEnvelope:
         """Handle a status query.
 
-        Returns current daemon state. In the full implementation, this
-        reads from the wiki current-run file. For now, returns a stub.
+        Reads the wiki current-run file and checks the background task
+        to determine the current daemon state. Returns run details if
+        a run is active, or idle state with queue depth otherwise.
         """
+        queue_depth = self._queue.size()
+
+        # Check the background task state
+        task_running = (
+            self._current_task is not None
+            and not self._current_task.done()
+        )
+
+        # Read wiki current-run state
+        try:
+            wiki_run = current_run_io.read(self._config.wiki_root)
+        except Exception as exc:
+            logger.warning("Failed to read current-run wiki: %s", exc)
+            wiki_run = None
+
+        if wiki_run is not None and wiki_run.is_active:
+            # Compute duration so far
+            duration_seconds: float | None = None
+            if wiki_run.started_at is not None:
+                delta = datetime.now(timezone.utc) - wiki_run.started_at
+                duration_seconds = max(0.0, delta.total_seconds())
+
+            # Map wiki RunStatus to a simple string for the response
+            if task_running:
+                status_str = "RUNNING"
+            elif wiki_run.status.value == "running":
+                # Task finished but wiki still says running -- check result
+                status_str = "RUNNING"
+            else:
+                status_str = wiki_run.status.value.upper()
+
+            extra: dict[str, Any] = {
+                "state": "active",
+                "run_id": wiki_run.run_id,
+                "host": (
+                    wiki_run.ssh_target.host
+                    if wiki_run.ssh_target is not None
+                    else ""
+                ),
+                "command": (
+                    wiki_run.command.resolved_shell
+                    if wiki_run.command is not None
+                    else ""
+                ),
+                "status": status_str,
+                "queue_depth": queue_depth,
+            }
+            if duration_seconds is not None:
+                extra["duration_seconds"] = round(duration_seconds, 2)
+
+            return _build_success_response(
+                msg_id=msg_id,
+                verb="status",
+                extra=extra,
+            )
+
+        # Check if the background task completed with a terminal state
+        if wiki_run is not None and wiki_run.is_terminal:
+            duration_seconds = None
+            if (
+                wiki_run.started_at is not None
+                and wiki_run.completed_at is not None
+            ):
+                delta = wiki_run.completed_at - wiki_run.started_at
+                duration_seconds = max(0.0, delta.total_seconds())
+
+            extra = {
+                "state": "completed",
+                "run_id": wiki_run.run_id,
+                "host": (
+                    wiki_run.ssh_target.host
+                    if wiki_run.ssh_target is not None
+                    else ""
+                ),
+                "command": (
+                    wiki_run.command.resolved_shell
+                    if wiki_run.command is not None
+                    else ""
+                ),
+                "status": wiki_run.status.value.upper(),
+                "queue_depth": queue_depth,
+            }
+            if duration_seconds is not None:
+                extra["duration_seconds"] = round(duration_seconds, 2)
+            if wiki_run.error is not None:
+                extra["error"] = wiki_run.error
+
+            return _build_success_response(
+                msg_id=msg_id,
+                verb="status",
+                extra=extra,
+            )
+
+        # No active run
         return _build_success_response(
             msg_id=msg_id,
             verb="status",
             extra={
                 "state": "idle",
-                "queue_depth": self._queue.size(),
+                "queue_depth": queue_depth,
             },
         )
 
