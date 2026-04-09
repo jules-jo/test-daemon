@@ -578,6 +578,12 @@ class ThinClient:
                 # Continue reading for the final response
                 continue
 
+            # Handle inline status/stream messages (print and continue)
+            if response.msg_type == MessageType.STREAM:
+                rendered_line = render_response(response)
+                print(rendered_line, flush=True)
+                continue
+
             # Terminal response
             is_success = response.msg_type != MessageType.ERROR
             rendered = render_response(response)

@@ -524,7 +524,7 @@ class RequestHandler:
                 },
             )
 
-        # Step 4: Execute the command via SSH
+        # Step 4: Send "connecting" status to CLI before SSH execution
         logger.info(
             "Run approved for msg_id=%s: executing '%s' on %s@%s:%d",
             msg_id,
@@ -533,6 +533,24 @@ class RequestHandler:
             target_host,
             target_port,
         )
+
+        connecting_msg = MessageEnvelope(
+            msg_type=MessageType.STREAM,
+            msg_id=f"status-{uuid.uuid4().hex[:12]}",
+            timestamp=_now_iso(),
+            payload={
+                "line": (
+                    f"\nConnecting to {target_user}@{target_host}:{target_port}...\n"
+                    f"Executing: {proposed_command}\n"
+                    f"Test is running. Waiting for results...\n"
+                ),
+                "is_end": False,
+            },
+        )
+        try:
+            await self._send_envelope(client, connecting_msg)
+        except Exception:
+            pass  # Best effort -- don't fail the run if status send fails
 
         result: RunResult = await execute_run(
             target_host=target_host,
