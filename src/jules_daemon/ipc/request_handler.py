@@ -433,16 +433,79 @@ class RequestHandler:
         # (explicit command path -- no LLM translation needed)
         proposed_command = natural_language
 
-        # Step 0: Check if a run is already active -- queue if so
+        # Step 0: Check if a run is already active -- ask user to queue or cancel
         if (
             self._current_task is not None
             and not self._current_task.done()
         ):
-            logger.info(
-                "Run already active (run_id=%s). Queuing command: %s",
-                self._current_run_id,
-                proposed_command[:80],
+            # Notify user that a run is active
+            busy_msg = MessageEnvelope(
+                msg_type=MessageType.STREAM,
+                msg_id=f"busy-{uuid.uuid4().hex[:12]}",
+                timestamp=_now_iso(),
+                payload={
+                    "line": (
+                        f"\nA test is already running (run_id={self._current_run_id}).\n"
+                        f"Command: {proposed_command}\n"
+                        f"Target: {target_user}@{target_host}\n"
+                    ),
+                    "is_end": False,
+                },
             )
+            try:
+                await self._send_envelope(client, busy_msg)
+            except Exception:
+                pass
+
+            # Ask: queue it or cancel?
+            queue_prompt = MessageEnvelope(
+                msg_type=MessageType.CONFIRM_PROMPT,
+                msg_id=f"queue-confirm-{uuid.uuid4().hex[:12]}",
+                timestamp=_now_iso(),
+                payload={
+                    "proposed_command": proposed_command,
+                    "target_host": target_host,
+                    "message": "Queue this command to run after the current test finishes?",
+                },
+            )
+            try:
+                await self._send_envelope(client, queue_prompt)
+            except Exception as exc:
+                return _build_error_response(
+                    msg_id=msg_id,
+                    error_summary="Failed to send queue prompt",
+                    validation_errors=[],
+                )
+
+            try:
+                queue_reply = await self._read_envelope(client, timeout=120.0)
+            except (asyncio.TimeoutError, Exception):
+                return _build_error_response(
+                    msg_id=msg_id,
+                    error_summary="Queue confirmation timed out",
+                    validation_errors=[],
+                )
+
+            if queue_reply is None:
+                return _build_error_response(
+                    msg_id=msg_id,
+                    error_summary="CLI disconnected during queue prompt",
+                    validation_errors=[],
+                )
+
+            queue_approved = queue_reply.payload.get("approved", False)
+            if not queue_approved:
+                logger.info("User chose not to queue command for msg_id=%s", msg_id)
+                return _build_success_response(
+                    msg_id=msg_id,
+                    verb="run",
+                    extra={
+                        "status": "cancelled",
+                        "message": "Command not queued. No action taken.",
+                    },
+                )
+
+            # User approved queuing
             queued = self._queue.enqueue(
                 natural_language=proposed_command,
                 ssh_host=target_host,
@@ -450,6 +513,12 @@ class RequestHandler:
                 ssh_port=target_port,
             )
             position = self._queue.size()
+            logger.info(
+                "User queued command (queue_id=%s, position=%d): %s",
+                queued.queue_id,
+                position,
+                proposed_command[:80],
+            )
             return _build_success_response(
                 msg_id=msg_id,
                 verb="run",
@@ -459,8 +528,7 @@ class RequestHandler:
                     "position": position,
                     "current_run_id": self._current_run_id,
                     "message": (
-                        f"A test is already running (run_id={self._current_run_id}). "
-                        f"Your command has been queued at position {position}. "
+                        f"Command queued at position {position}. "
                         f"It will start automatically when the current run finishes."
                     ),
                 },
