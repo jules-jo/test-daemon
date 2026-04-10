@@ -160,14 +160,17 @@ class CommandResult:
 # Confirm callback type
 # ---------------------------------------------------------------------------
 
-ConfirmCallback = Callable[[MessageEnvelope], bool]
+ConfirmCallback = Callable[[MessageEnvelope], "tuple[bool, str | None]"]
 """Callback invoked when the daemon sends a CONFIRM_PROMPT.
 
-Receives the prompt envelope and returns True to approve, False to deny.
+Receives the prompt envelope and returns (approved, edited_command).
+If approved is True and edited_command is None, the original is used.
+If approved is True and edited_command is provided, that replaces the
+original. If approved is False, the command is denied.
 """
 
 
-def _default_confirm_callback(envelope: MessageEnvelope) -> bool:
+def _default_confirm_callback(envelope: MessageEnvelope) -> tuple[bool, str | None]:
     """Default confirmation callback -- always denies for safety.
 
     In a real integration, this would prompt the user. The thin client
@@ -177,13 +180,13 @@ def _default_confirm_callback(envelope: MessageEnvelope) -> bool:
         envelope: The CONFIRM_PROMPT envelope from the daemon.
 
     Returns:
-        Always False (deny).
+        (False, None) -- always deny.
     """
     logger.warning(
         "Default confirm callback: denying command (msg_id=%s)",
         envelope.msg_id,
     )
-    return False
+    return False, None
 
 
 # ---------------------------------------------------------------------------
@@ -569,10 +572,11 @@ class ThinClient:
 
             # Handle confirmation prompt
             if response.msg_type == MessageType.CONFIRM_PROMPT:
-                approved = self._on_confirm(response)
+                approved, edited = self._on_confirm(response)
                 reply = build_confirm_reply(
                     approved=approved,
                     original_msg_id=response.msg_id,
+                    edited_command=edited,
                 )
                 await conn.send(reply)
                 # Continue reading for the final response

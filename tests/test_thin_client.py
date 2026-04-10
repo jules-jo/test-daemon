@@ -222,7 +222,7 @@ class TestDefaultConfirmCallback:
 
     def test_always_denies(self):
         prompt = _make_confirm_prompt()
-        assert _default_confirm_callback(prompt) is False
+        assert _default_confirm_callback(prompt) == (False, None)
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +459,7 @@ class TestThinClientRun:
         conn = _make_mock_connection(responses=[prompt, final_response])
 
         # Approve callback
-        approve_callback = MagicMock(return_value=True)
+        approve_callback = MagicMock(return_value=(True, None))
         client = ThinClient(on_confirm=approve_callback)
 
         with patch.object(client, "_create_connection", return_value=conn):
@@ -486,7 +486,7 @@ class TestThinClientRun:
         error_response = _make_error("run", "Command denied by user", 403)
         conn = _make_mock_connection(responses=[prompt, error_response])
 
-        deny_callback = MagicMock(return_value=False)
+        deny_callback = MagicMock(return_value=(False, None))
         client = ThinClient(on_confirm=deny_callback)
 
         with patch.object(client, "_create_connection", return_value=conn):
@@ -552,7 +552,7 @@ class TestThinClientRun:
         prompt = _make_confirm_prompt()
         conn = _make_mock_connection(responses=[prompt, None])
 
-        approve = MagicMock(return_value=True)
+        approve = MagicMock(return_value=(True, None))
         client = ThinClient(on_confirm=approve)
 
         with patch.object(client, "_create_connection", return_value=conn):
@@ -740,7 +740,7 @@ class TestConnectionLifecycle:
         # Make the confirm reply send fail
         conn.send = AsyncMock(side_effect=[None, BrokenPipeError("broken")])
 
-        client = ThinClient(on_confirm=MagicMock(return_value=True))
+        client = ThinClient(on_confirm=MagicMock(return_value=(True, None)))
         with patch.object(client, "_create_connection", return_value=conn):
             result = await client.run(
                 target_host="ci.example.com",

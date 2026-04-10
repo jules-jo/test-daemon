@@ -925,6 +925,17 @@ class RequestHandler:
                 },
             )
 
+        # If the user edited the command, use the edited version
+        edited_command = reply.payload.get("edited_command")
+        if edited_command:
+            logger.info(
+                "User edited command for msg_id=%s: '%s' -> '%s'",
+                msg_id,
+                proposed_command[:80],
+                edited_command[:80],
+            )
+            proposed_command = edited_command
+
         logger.info(
             "Run approved for msg_id=%s: '%s' on %s@%s:%d",
             msg_id,

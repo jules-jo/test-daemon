@@ -71,28 +71,52 @@ _CLASSIFIER_CONFIDENCE_THRESHOLD: float = 0.7
 # ---------------------------------------------------------------------------
 
 
-def _interactive_confirm(envelope: MessageEnvelope) -> bool:
-    """Prompt the user to approve or deny an SSH command.
+def _interactive_confirm(envelope: MessageEnvelope) -> tuple[bool, str | None]:
+    """Prompt the user to approve, deny, or edit an SSH command.
 
-    Displays the proposed command from the daemon's CONFIRM_PROMPT
-    envelope and asks for y/n confirmation.
+    Displays the proposed command and asks for approve/deny/edit.
+    If the user picks edit, reads a new command line and returns it
+    along with approved=True.
 
     Args:
         envelope: The CONFIRM_PROMPT envelope from the daemon.
 
     Returns:
-        True if the user approved, False otherwise.
+        (approved, edited_command) tuple. edited_command is None if
+        the original was accepted as-is, or the new text if edited.
     """
     prompt_text = render_confirm_prompt(envelope)
     print(prompt_text)
 
+    original_command = (
+        envelope.payload.get("proposed_command")
+        or envelope.payload.get("command")
+        or ""
+    )
+
     try:
-        answer = input("Approve? [y/N] ").strip().lower()
+        answer = input("[A]pprove / [D]eny / [E]dit? ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         print()
-        return False
+        return False, None
 
-    return answer in ("y", "yes")
+    if answer in ("a", "approve", "y", "yes"):
+        return True, None
+
+    if answer in ("e", "edit"):
+        print(f"Current: {original_command}")
+        try:
+            edited = input("New command: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False, None
+        if not edited:
+            print("Empty command, denying.")
+            return False, None
+        return True, edited
+
+    # Anything else: deny
+    return False, None
 
 
 # ---------------------------------------------------------------------------

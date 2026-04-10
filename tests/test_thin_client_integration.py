@@ -405,7 +405,7 @@ class TestThinClientIntegrationRun:
                 receive_timeout=5.0,
             )
 
-            approval_called = MagicMock(return_value=True)
+            approval_called = MagicMock(return_value=(True, None))
             client = ThinClient(config=config, on_confirm=approval_called)
 
             result = await client.run(
@@ -452,7 +452,7 @@ class TestThinClientIntegrationRun:
                 receive_timeout=5.0,
             )
 
-            deny_callback = MagicMock(return_value=False)
+            deny_callback = MagicMock(return_value=(False, None))
             client = ThinClient(config=config, on_confirm=deny_callback)
 
             result = await client.run(
