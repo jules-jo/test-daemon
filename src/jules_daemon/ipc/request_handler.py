@@ -934,6 +934,40 @@ class RequestHandler:
             target_port,
         )
 
+        # Save the approved translation to the wiki so future NL requests
+        # on this host can use it as context. Only save NL-translated commands
+        # (skip direct commands since there's nothing to learn there).
+        if not is_direct_command(natural_language):
+            try:
+                from jules_daemon.wiki.command_translation import (
+                    CommandTranslation,
+                    TranslationOutcome,
+                    save as save_translation,
+                )
+                was_edited = proposed_command != natural_language
+                translation = CommandTranslation(
+                    natural_language=natural_language,
+                    resolved_shell=proposed_command,
+                    ssh_host=target_host,
+                    outcome=(
+                        TranslationOutcome.EDITED if was_edited
+                        else TranslationOutcome.APPROVED
+                    ),
+                    model_id=(
+                        self._config.llm_config.default_model
+                        if self._config.llm_config else "direct"
+                    ),
+                )
+                save_translation(self._config.wiki_root, translation)
+                logger.debug(
+                    "Saved translation to wiki: '%s' -> '%s' on %s",
+                    natural_language[:50],
+                    proposed_command[:80],
+                    target_host,
+                )
+            except Exception as exc:
+                logger.warning("Failed to save translation to wiki: %s", exc)
+
         # Step 4: Collision detection -- check for running test processes
         credential = resolve_ssh_credentials(target_host)
         remote_processes = await check_remote_processes(
