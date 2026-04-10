@@ -20,9 +20,12 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import difflib
 import sys
 from pathlib import Path
 
+from jules_daemon.classifier.classify import classify
+from jules_daemon.classifier.models import InputType
 from jules_daemon.ipc.framing import MessageEnvelope
 from jules_daemon.thin_client.client import ThinClient, ThinClientConfig
 from jules_daemon.thin_client.renderer import render_confirm_prompt
@@ -34,6 +37,33 @@ _QUIT_COMMANDS = frozenset({"quit", "exit", "q", "c"})
 _VERB_MAP = frozenset({
     "status", "history", "cancel", "run", "watch", "health",
 })
+
+# Ordered tuple of verbs used for fuzzy typo correction. Kept as a
+# tuple because difflib.get_close_matches requires a sequence and we
+# want deterministic iteration order for stable match ranking.
+_KNOWN_VERBS: tuple[str, ...] = (
+    "run",
+    "status",
+    "watch",
+    "history",
+    "cancel",
+    "queue",
+    "health",
+)
+
+# Minimum number of characters in the first token before we attempt
+# fuzzy matching. Single-character tokens are too short for difflib
+# similarity ratios to be meaningful and would produce noisy matches.
+_FUZZY_MIN_LENGTH: int = 2
+
+# difflib cutoff for fuzzy verb matching. Tuned to catch common typos
+# (wajch, statuz, histroy, helath) without matching unrelated words.
+_FUZZY_CUTOFF: float = 0.6
+
+# Minimum classifier confidence required before we trust a natural
+# language interpretation. Matches the classifier's own internal
+# threshold for "confident" results.
+_CLASSIFIER_CONFIDENCE_THRESHOLD: float = 0.7
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +237,134 @@ async def _execute_single(
 
 
 # ---------------------------------------------------------------------------
+# Hybrid verb resolution
+# ---------------------------------------------------------------------------
+
+
+def _fuzzy_match_verb(first_word: str) -> str | None:
+    """Attempt to fuzzy-match a single token against the known verbs.
+
+    Uses ``difflib.get_close_matches`` with a conservative cutoff to
+    catch common typos (``wajch``, ``statuz``, ``histroy``) without
+    mapping unrelated words. Single-character tokens are skipped to
+    avoid noisy matches -- a lone ``c`` should never silently become
+    ``cancel``.
+
+    Args:
+        first_word: The first whitespace-delimited token from the
+            user's input. Caller is responsible for lower-casing and
+            stripping whitespace.
+
+    Returns:
+        A canonical verb string when a close match is found, or
+        ``None`` when no candidate exceeds the cutoff or the token is
+        too short for meaningful fuzzy matching.
+    """
+    if len(first_word) < _FUZZY_MIN_LENGTH:
+        return None
+    matches = difflib.get_close_matches(
+        first_word,
+        _KNOWN_VERBS,
+        n=1,
+        cutoff=_FUZZY_CUTOFF,
+    )
+    if matches:
+        return matches[0]
+    return None
+
+
+def _classify_natural_language(raw: str) -> str | None:
+    """Ask the pattern-based classifier to interpret natural language.
+
+    Delegates to the existing deterministic ``classify()`` entry point
+    (no LLM calls) and accepts the result only when the classifier
+    reports a confident, non-ambiguous interpretation. The confidence
+    gate matches the classifier's own internal "is confident" threshold
+    so that borderline guesses are rejected rather than silently
+    reinterpreting user input.
+
+    Args:
+        raw: The raw, stripped user input string.
+
+    Returns:
+        The canonical verb string when the classifier is confident,
+        otherwise ``None`` so the caller can emit an ``Unknown
+        command`` error.
+    """
+    result = classify(raw)
+    if result.input_type == InputType.AMBIGUOUS:
+        return None
+    if result.confidence_score < _CLASSIFIER_CONFIDENCE_THRESHOLD:
+        return None
+    return result.canonical_verb
+
+
+def _resolve_verb(raw: str) -> tuple[list[str], str | None] | None:
+    """Resolve raw REPL input into command parts via a 3-layer lookup.
+
+    The resolver never calls the network or the LLM. It runs three
+    progressively more forgiving layers:
+
+    1. Exact match: if the first token is already a known verb, the
+       original ``raw.split()`` tokens are returned unchanged and no
+       hint is emitted.
+    2. Fuzzy match: the first token is compared against the known
+       verbs with ``difflib``; a close match replaces only the first
+       token (preserving remaining ``run`` arguments such as the
+       ``user@host`` target and free-form command description) and a
+       subtle hint is emitted so the user sees how the input was
+       rewritten.
+    3. Classifier fallback: the full raw input is passed to the
+       pattern-based classifier, which resolves natural language like
+       ``"what's running?"`` or ``"kill the test"`` to a canonical
+       verb. Any extracted arguments are dropped here because
+       ``_execute_single`` relies on positional ``argv`` tokens; when
+       the classifier picks a verb that requires arguments (such as
+       ``run``), dispatch will surface the normal usage error.
+
+    Args:
+        raw: The stripped, non-empty REPL input line.
+
+    Returns:
+        A ``(parts, hint)`` tuple suitable for passing to
+        ``_execute_single``, where ``hint`` is an optional one-line
+        interpretation message to print before dispatch, or ``None``
+        when the input cannot be resolved and the caller should emit
+        an ``Unknown command`` error.
+    """
+    parts = raw.split()
+    if not parts:
+        return None
+
+    first_word = parts[0].lower()
+
+    # Layer 1: exact match against the known verb set. We intentionally
+    # do not lower-case the rest of the tokens -- "run" arguments such
+    # as natural-language test descriptions must preserve their
+    # original casing.
+    if first_word in _KNOWN_VERBS:
+        return parts, None
+
+    # Layer 2: fuzzy match to correct typos. Only the first token is
+    # rewritten; the remaining tokens (e.g., ``user@host`` targets and
+    # test descriptions for ``run``) are passed through verbatim.
+    fuzzy_verb = _fuzzy_match_verb(first_word)
+    if fuzzy_verb is not None:
+        corrected = [fuzzy_verb, *parts[1:]]
+        return corrected, f"(interpreted as '{fuzzy_verb}')"
+
+    # Layer 3: classifier fallback for natural language. When the
+    # classifier is confident we dispatch with just the canonical verb
+    # -- extracted args are not threaded through because the current
+    # ``_execute_single`` dispatcher parses positional argv tokens.
+    classified_verb = _classify_natural_language(raw)
+    if classified_verb is not None:
+        return [classified_verb], f"(interpreted as '{classified_verb}')"
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # REPL mode
 # ---------------------------------------------------------------------------
 
@@ -244,7 +402,18 @@ async def _repl(client: ThinClient) -> int:
             _print_help()
             continue
 
-        parts = raw.split()
+        resolved = _resolve_verb(raw)
+        if resolved is None:
+            first_word = raw.split()[0]
+            print(f"Unknown command: {first_word}")
+            print("Try 'help' to see available commands")
+            print()
+            continue
+
+        parts, hint = resolved
+        if hint is not None:
+            print(hint)
+
         exit_code = await _execute_single(client, parts)
         if exit_code != 0:
             print(f"(exit code: {exit_code})")
