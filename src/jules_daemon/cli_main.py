@@ -283,6 +283,15 @@ def _classify_natural_language(raw: str) -> str | None:
     so that borderline guesses are rejected rather than silently
     reinterpreting user input.
 
+    TODO(future): Swap to LLM-based classification for more robust
+    natural language understanding. The current pattern-based classifier
+    is brittle -- only pre-written keyword phrases work ("what's running"
+    matches, but "are the tests done yet?" won't). To upgrade, replace
+    the body of this function with a call to the Dataiku Mesh LLM that
+    returns the canonical verb. The signature stays the same -- no
+    other code in the CLI needs to change. Consider caching recent
+    classifications to reduce LLM calls for repeated queries.
+
     Args:
         raw: The raw, stripped user input string.
 
