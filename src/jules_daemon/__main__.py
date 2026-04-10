@@ -259,13 +259,17 @@ def main() -> None:
         args.log_level,
     )
 
-    exit_code = asyncio.run(
-        _run_daemon(
-            wiki_dir=args.wiki_dir,
-            socket_path=socket_path,
-            skip_scan=args.skip_startup_scan,
+    try:
+        exit_code = asyncio.run(
+            _run_daemon(
+                wiki_dir=args.wiki_dir,
+                socket_path=socket_path,
+                skip_scan=args.skip_startup_scan,
+            )
         )
-    )
+    except KeyboardInterrupt:
+        print("\nDaemon stopped.")
+        exit_code = 0
     sys.exit(exit_code)
 
 

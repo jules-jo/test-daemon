@@ -28,7 +28,7 @@ from jules_daemon.thin_client.client import ThinClient, ThinClientConfig
 from jules_daemon.thin_client.renderer import render_confirm_prompt
 
 _PROMPT = "jules> "
-_QUIT_COMMANDS = frozenset({"quit", "exit", "q"})
+_QUIT_COMMANDS = frozenset({"quit", "exit", "q", "c"})
 
 # Verb routing table: maps user-facing verb strings to thin client methods.
 _VERB_MAP = frozenset({
@@ -263,7 +263,7 @@ def _print_help() -> None:
     print("  history [--limit N] [--status S] View past results")
     print("  health                        Check daemon liveness")
     print("  help                          Show this help")
-    print("  quit                          Exit the CLI")
+    print("  quit / c / Ctrl+C             Exit the CLI")
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +310,11 @@ def main() -> None:
             filtered_args.append(args[i])
             i += 1
 
-    exit_code = asyncio.run(_async_main(filtered_args, socket_path))
+    try:
+        exit_code = asyncio.run(_async_main(filtered_args, socket_path))
+    except KeyboardInterrupt:
+        print("\nBye!")
+        exit_code = 0
     sys.exit(exit_code)
 
 
