@@ -1096,20 +1096,27 @@ class RequestHandler:
             except Exception:
                 break  # Client disconnected
 
-        # Step 2: Poll for new lines until run completes
-        while (
-            self._current_task is not None
-            and not self._current_task.done()
-        ):
+        # Step 2: Poll for new lines until end sentinel (None) is received.
+        # Don't rely on task.done() -- the queue may still have lines
+        # after the task finishes. Wait for the explicit None sentinel.
+        while True:
             try:
                 line = await asyncio.wait_for(
-                    self._output_queue.get(), timeout=1.0,
+                    self._output_queue.get(), timeout=5.0,
                 )
             except asyncio.TimeoutError:
+                # No new output for 5 seconds -- check if task is still alive
+                if (
+                    self._current_task is None
+                    or self._current_task.done()
+                ):
+                    # Task finished and queue is drained -- exit
+                    break
+                # Task still running, just no output yet -- keep waiting
                 continue
 
             if line is None:
-                # End sentinel
+                # End sentinel from background task -- all output received
                 break
 
             sent_count += 1
@@ -1122,23 +1129,6 @@ class RequestHandler:
             try:
                 await self._send_envelope(client, stream_msg)
             except Exception:
-                break
-
-        # Drain any remaining items in the queue
-        while not self._output_queue.empty():
-            try:
-                line = self._output_queue.get_nowait()
-                if line is None:
-                    break
-                sent_count += 1
-                stream_msg = MessageEnvelope(
-                    msg_type=MessageType.STREAM,
-                    msg_id=f"watch-{uuid.uuid4().hex[:12]}",
-                    timestamp=_now_iso(),
-                    payload={"line": line, "is_end": False},
-                )
-                await self._send_envelope(client, stream_msg)
-            except (asyncio.QueueEmpty, Exception):
                 break
 
         # Step 3: Send end-of-stream
