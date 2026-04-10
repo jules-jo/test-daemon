@@ -321,6 +321,10 @@ class RequestHandler:
         # Last failure message, shown to the next CLI that connects
         # after a background run fails. Cleared when displayed.
         self._last_failure: str | None = None
+        # Last completed run (success or failure) kept in memory so
+        # `status` can report it after promote_run() clears the wiki
+        # current-run state. Cleared when a new run starts.
+        self._last_completed_run: RunResult | None = None
 
         # LLM command translator -- optional, None when env vars are not set.
         self._command_translator: CommandTranslator | None = None
@@ -1112,6 +1116,9 @@ class RequestHandler:
         except Exception:
             pass  # Best effort -- don't fail the run if status send fails
 
+        # Clear the previous completed run -- a new run is starting
+        self._last_completed_run = None
+
         # Spawn execute_run as a background task
         self._current_run_id = run_id
         self._current_task = asyncio.create_task(
@@ -1273,6 +1280,10 @@ class RequestHandler:
                 error=str(exc),
             )
 
+        # Store the last completed run so `status` can report it even
+        # after promote_run() clears the wiki current-run state.
+        self._last_completed_run = result
+
         # Signal end-of-stream to any watch subscribers
         try:
             self._output_queue.put_nowait(None)
@@ -1378,9 +1389,11 @@ class RequestHandler:
     ) -> MessageEnvelope:
         """Handle a status query.
 
-        Reads the wiki current-run file and checks the background task
-        to determine the current daemon state. Returns run details if
-        a run is active, or idle state with queue depth otherwise.
+        Priority order:
+        1. Active background task -> show RUNNING with live wiki data
+        2. Recently completed run in memory -> show final result
+        3. Wiki current-run file -> show whatever state is there
+        4. Otherwise -> idle
         """
         queue_depth = self._queue.size()
 
@@ -1389,6 +1402,34 @@ class RequestHandler:
             self._current_task is not None
             and not self._current_task.done()
         )
+
+        # If no task is running but we have a recently completed run,
+        # report its final result. This takes priority over the wiki
+        # current-run state because promote_run() clears the wiki after
+        # each run completes.
+        if not task_running and self._last_completed_run is not None:
+            last = self._last_completed_run
+            final_status = "COMPLETED" if last.success else "FAILED"
+            duration = last.duration_seconds
+            extra: dict[str, Any] = {
+                "state": "completed",
+                "run_id": last.run_id,
+                "host": last.target_host,
+                "command": last.command,
+                "status": final_status,
+                "exit_code": last.exit_code,
+                "duration_seconds": round(duration, 2),
+                "queue_depth": queue_depth,
+            }
+            if last.error:
+                extra["error"] = last.error
+            if last.stderr:
+                extra["stderr"] = last.stderr[:2000]
+            return _build_success_response(
+                msg_id=msg_id,
+                verb="status",
+                extra=extra,
+            )
 
         # Read wiki current-run state
         try:
