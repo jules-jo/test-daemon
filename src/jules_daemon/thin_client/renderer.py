@@ -150,7 +150,8 @@ def _render_generic_response(envelope: MessageEnvelope) -> str:
     """
     payload = envelope.payload
     verb = payload.get("verb", "unknown")
-    status = payload.get("status", "ok")
+    # Prefer the explicit status field, fall back to state, then "ok"
+    status = payload.get("status") or payload.get("state") or "ok"
 
     lines = [f"RESPONSE ({verb}) [{status}]"]
 

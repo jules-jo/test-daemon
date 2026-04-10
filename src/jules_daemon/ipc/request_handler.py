@@ -1412,6 +1412,12 @@ class RequestHandler:
                 wiki_root=self._config.wiki_root,
                 on_output=_on_output,
             )
+            # Set _last_completed_run IMMEDIATELY after execute_run
+            # returns to avoid a race window where status sees no active
+            # run state. The audit/summary work below can take a few
+            # hundred ms (LLM calls), so users typing 'status' during
+            # that window would otherwise see "[ok]" instead of [COMPLETED].
+            self._last_completed_run = result
             logger.info(
                 "Background run completed: run_id=%s success=%s",
                 result.run_id,
