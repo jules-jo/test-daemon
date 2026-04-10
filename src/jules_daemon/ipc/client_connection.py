@@ -244,6 +244,9 @@ class HandshakeResult:
         daemon_pid:            Daemon process ID. None on failure.
         daemon_uptime_seconds: Daemon uptime in seconds. None on failure.
         error:                 Error description on failure. None on success.
+        pending_failure:       Unreported failure from a background run,
+                               present when the daemon has a stored
+                               failure that the client has not yet seen.
     """
 
     success: bool
@@ -251,6 +254,7 @@ class HandshakeResult:
     daemon_pid: int | None
     daemon_uptime_seconds: float | None
     error: str | None
+    pending_failure: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +343,7 @@ def _parse_handshake_response(
             ),
         )
 
+    pending_failure = payload.get("pending_failure")
     return HandshakeResult(
         success=True,
         protocol_version=int(daemon_version),
@@ -347,6 +352,7 @@ def _parse_handshake_response(
             float(daemon_uptime) if daemon_uptime is not None else None
         ),
         error=None,
+        pending_failure=pending_failure if isinstance(pending_failure, str) else None,
     )
 
 

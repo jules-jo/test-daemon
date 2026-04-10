@@ -318,6 +318,9 @@ class RequestHandler:
         self._output_buffer: list[str] = []
         self._output_lock = asyncio.Lock()
         self._output_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        # Last failure message, shown to the next CLI that connects
+        # after a background run fails. Cleared when displayed.
+        self._last_failure: str | None = None
 
         # LLM command translator -- optional, None when env vars are not set.
         self._command_translator: CommandTranslator | None = None
@@ -622,19 +625,27 @@ class RequestHandler:
         """Handle the initial client handshake.
 
         Returns daemon version, uptime, and status so the client can
-        verify compatibility.
+        verify compatibility. Also includes any unreported failure from
+        a background run (cleared after being delivered).
         """
         import os
+
+        extra: dict[str, Any] = {
+            "status": "ok",
+            "protocol_version": 1,
+            "daemon_version": "0.1.0",
+            "pid": os.getpid(),
+        }
+
+        # Deliver any pending failure notification to the next client
+        if self._last_failure:
+            extra["pending_failure"] = self._last_failure
+            self._last_failure = None
 
         return _build_success_response(
             msg_id=msg_id,
             verb="handshake",
-            extra={
-                "status": "ok",
-                "protocol_version": 1,
-                "daemon_version": "0.1.0",
-                "pid": os.getpid(),
-            },
+            extra=extra,
         )
 
     def _handle_queue(
@@ -1187,6 +1198,32 @@ class RequestHandler:
                 result.run_id,
                 result.success,
             )
+
+            # If the run failed, push an error notification into the
+            # output queue so any active watchers see it. Also store
+            # the failure summary so the next CLI session can display it.
+            if not result.success:
+                error_summary = (
+                    f"\n!!! RUN FAILED !!!\n"
+                    f"Run ID: {result.run_id}\n"
+                    f"Command: {command}\n"
+                    f"Exit code: {result.exit_code}\n"
+                )
+                if result.error:
+                    error_summary += f"Error: {result.error}\n"
+                if result.stderr:
+                    error_summary += f"Stderr:\n{result.stderr[:1000]}\n"
+                try:
+                    self._output_queue.put_nowait(error_summary)
+                except asyncio.QueueFull:
+                    pass
+                # Persist the last failure so the CLI sees it on reconnect
+                self._last_failure = error_summary
+                logger.warning(
+                    "Run %s failed with exit_code=%s",
+                    result.run_id,
+                    result.exit_code,
+                )
         except Exception as exc:
             logger.error(
                 "Background run failed with unexpected error: %s",

@@ -526,6 +526,10 @@ class ThinClient:
                 error=handshake.error,
             )
 
+        # Print any pending failure notification from a prior background run
+        if handshake.pending_failure:
+            print(handshake.pending_failure, flush=True)
+
         try:
             await conn.send(request)
             return await self._confirmation_loop(conn, verb)
