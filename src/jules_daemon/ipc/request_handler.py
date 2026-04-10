@@ -67,7 +67,6 @@ from typing import Any
 
 from jules_daemon.audit.models import AuditRecord
 from jules_daemon.audit.run_audit_builder import (
-    AUDIT_OUTPUT_LIMIT,
     build_confirmation_record,
     build_nl_input_record,
     build_parsed_command_record,
@@ -80,6 +79,10 @@ from jules_daemon.audit.run_audit_builder import (
 from jules_daemon.execution.collision_check import (
     check_remote_processes,
     format_collision_warning,
+)
+from jules_daemon.execution.output_summarizer import (
+    OutputSummary,
+    summarize_output,
 )
 from jules_daemon.execution.run_pipeline import RunResult, execute_run
 from jules_daemon.ipc.framing import (
@@ -116,6 +119,55 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Audit summary formatting
+# ---------------------------------------------------------------------------
+
+# Maximum number of characters of the raw stdout/stderr that the audit
+# writer embeds in the ``summary`` / ``error_message`` fields. Smaller
+# than :data:`AUDIT_OUTPUT_LIMIT` because the new structured summary
+# (counts + narrative) carries the high-level information. The raw
+# tail is kept as a fallback for debugging when a parser label is
+# ``"none"``.
+_AUDIT_RAW_TAIL_LIMIT: int = 2_000
+
+
+def _format_output_summary(*, summary_obj: OutputSummary) -> str:
+    """Render an :class:`OutputSummary` as human-readable multi-line text.
+
+    The shape mirrors what audit-file readers expect:
+
+        <narrative>
+
+        Parser: <parser>
+        Passed: N | Failed: N | Skipped: N
+        Duration: N.NNs            # only when available
+        Key failures:              # only when non-empty
+          - ...
+          - ...
+
+    Empty values are omitted so short summaries stay scannable.
+    """
+    lines: list[str] = []
+    if summary_obj.narrative:
+        lines.append(summary_obj.narrative)
+        lines.append("")
+    lines.append(f"Parser: {summary_obj.parser}")
+    lines.append(
+        f"Passed: {summary_obj.passed} | "
+        f"Failed: {summary_obj.failed} | "
+        f"Skipped: {summary_obj.skipped}"
+    )
+    if summary_obj.duration_seconds is not None:
+        lines.append(f"Duration: {summary_obj.duration_seconds:.2f}s")
+    if summary_obj.key_failures:
+        lines.append("")
+        lines.append("Key failures:")
+        for failure in summary_obj.key_failures:
+            lines.append(f"  - {failure}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1488,11 +1540,15 @@ class RequestHandler:
         is aligned to ``result.run_id`` so the audit file correlates
         with the wiki history entry.
 
-        Stdout and stderr are truncated via :func:`truncate_text` and
-        embedded in the ``summary`` / ``error_message`` fields (the
-        current :class:`SSHExecutionRecord` schema has no dedicated
-        output fields). Passwords are never referenced in this path --
-        only the host, user, port, and command strings are consumed.
+        The structured summary is produced by
+        :func:`jules_daemon.execution.output_summarizer.summarize_output`,
+        which yields a high-level description (counts, narrative, key
+        failures) instead of the raw stdout/stderr. A bounded tail of
+        the raw output is still embedded in the summary text (success
+        runs) or in ``error_message`` (failed runs) so the audit file
+        retains enough context for debugging. Passwords are never
+        referenced in this path -- only the host, user, port, and
+        command strings are consumed.
 
         Args:
             audit: The partial audit record carrying NL input, parsed
@@ -1523,24 +1579,35 @@ class RequestHandler:
         )
         audit = audit.with_ssh_execution(ssh_record)
 
-        # Build a concise outcome summary. We include the exit code
-        # when available, a truncated tail of stdout on success, and
-        # a truncated tail of stderr on failure. Truncation keeps
-        # audit files under control even for pathological output.
-        # The section separator intentionally avoids ``---`` because
-        # YAML would interpret that as a document break inside the
-        # frontmatter.
-        stdout_tail = truncate_text(result.stdout, AUDIT_OUTPUT_LIMIT)
-        stderr_tail = truncate_text(result.stderr, AUDIT_OUTPUT_LIMIT)
-        section_sep = "\n\n=== "
+        # Produce a high-level summary of the command output. The
+        # summarizer tries regex parsers first (pytest, unittest, jest,
+        # generic iteration loops) and then optionally asks the LLM for
+        # a narrative description. Any LLM error is swallowed inside
+        # the summarizer so this call never crashes the audit flow.
+        summary_obj = await self._safe_summarize_output(result=result)
+
+        output_summary_text = _format_output_summary(summary_obj=summary_obj)
+
+        # Bound the raw stdout/stderr tail we embed for debugging. The
+        # summarizer already truncates to ~500 chars, but the audit
+        # writer used to embed up to AUDIT_OUTPUT_LIMIT characters --
+        # we keep a larger 2000-character tail for the audit file to
+        # retain meaningful context without exploding file size.
+        stdout_tail = truncate_text(result.stdout, _AUDIT_RAW_TAIL_LIMIT)
+        stderr_tail = truncate_text(result.stderr, _AUDIT_RAW_TAIL_LIMIT)
+
         if result.success:
-            summary = (
-                f"Command exited with code {result.exit_code}"
+            summary_pieces: list[str] = [
+                output_summary_text,
+                f"Exit code: {result.exit_code}"
                 if result.exit_code is not None
-                else "Command completed successfully"
-            )
+                else "Exit code: (none)",
+            ]
             if stdout_tail:
-                summary = f"{summary}{section_sep}stdout ===\n{stdout_tail}"
+                summary_pieces.append(f"=== stdout (tail) ===\n{stdout_tail}")
+            elif stderr_tail:
+                summary_pieces.append(f"=== stderr (tail) ===\n{stderr_tail}")
+            summary = "\n\n".join(piece for piece in summary_pieces if piece)
             error_message: str | None = None
         else:
             exit_fragment = (
@@ -1548,14 +1615,18 @@ class RequestHandler:
                 if result.exit_code is not None
                 else "no exit code (connection failure)"
             )
-            summary = f"Command failed ({exit_fragment})"
+            summary_pieces = [
+                output_summary_text,
+                f"Command failed ({exit_fragment})",
+            ]
+            summary = "\n\n".join(piece for piece in summary_pieces if piece)
             error_parts: list[str] = []
             if result.error:
                 error_parts.append(result.error)
             if stderr_tail:
-                error_parts.append(f"=== stderr ===\n{stderr_tail}")
+                error_parts.append(f"=== stderr (tail) ===\n{stderr_tail}")
             elif stdout_tail:
-                error_parts.append(f"=== stdout ===\n{stdout_tail}")
+                error_parts.append(f"=== stdout (tail) ===\n{stdout_tail}")
             error_message = "\n\n".join(error_parts) if error_parts else None
 
         structured = build_structured_result_record(
@@ -1563,6 +1634,10 @@ class RequestHandler:
             exit_code=result.exit_code,
             summary=summary,
             error_message=error_message,
+            tests_passed=summary_obj.passed,
+            tests_failed=summary_obj.failed,
+            tests_skipped=summary_obj.skipped,
+            tests_total=summary_obj.total,
         )
         audit = audit.with_structured_result(structured)
 
@@ -1570,6 +1645,38 @@ class RequestHandler:
             wiki_root=self._config.wiki_root,
             record=audit,
         )
+
+    async def _safe_summarize_output(
+        self,
+        *,
+        result: RunResult,
+    ) -> OutputSummary:
+        """Call the output summarizer without crashing the audit flow.
+
+        Any exception raised by the summarizer is caught and converted
+        into an empty :class:`OutputSummary`. This guarantees that the
+        audit record can always be written, even if the LLM client is
+        misconfigured or the regex layer hits a pathological input.
+        """
+        try:
+            llm_model: str | None = None
+            if self._config.llm_config is not None:
+                llm_model = self._config.llm_config.default_model
+            return await summarize_output(
+                stdout=result.stdout,
+                stderr=result.stderr,
+                command=result.command,
+                exit_code=result.exit_code,
+                llm_client=self._config.llm_client,
+                llm_model=llm_model,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Output summarizer failed for run_id=%s: %s",
+                result.run_id,
+                exc,
+            )
+            return OutputSummary(parser="none")
 
     def _try_start_next_queued(self) -> None:
         """Check the queue and spawn the next command if available.
