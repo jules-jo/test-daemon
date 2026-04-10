@@ -224,7 +224,7 @@ async def _repl(client: ThinClient) -> int:
         0 on normal exit.
     """
     print("Jules SSH Test Runner -- Interactive Mode")
-    print("Type 'help' for available commands, 'quit' to exit")
+    print("Type 'help' for commands, 'c' or Ctrl+C to exit")
     print()
 
     while True:

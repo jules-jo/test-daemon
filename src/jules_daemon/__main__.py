@@ -227,6 +227,7 @@ async def _run_daemon(
             wiki_dir,
             os.getpid(),
         )
+        print("Jules daemon is running. Press Ctrl+C to stop.")
         await shutdown_event.wait()
 
     logger.info("Jules daemon stopped")
