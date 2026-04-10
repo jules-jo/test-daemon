@@ -85,12 +85,108 @@ from jules_daemon.wiki import current_run as current_run_io
 from jules_daemon.wiki.command_queue import CommandQueue
 from jules_daemon.wiki.run_promotion import list_history, read_history_entry
 
+# Conditional LLM imports -- these are Optional and never crash the daemon.
+# The TYPE_CHECKING guard keeps the type annotations available to type
+# checkers while avoiding import-time failures if LLM dependencies are
+# somehow not installed (defensive, since they are listed in project deps).
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from openai import OpenAI
+
+    from jules_daemon.llm.command_translator import CommandTranslator
+    from jules_daemon.llm.config import LLMConfig
+
 __all__ = [
     "RequestHandler",
     "RequestHandlerConfig",
+    "is_direct_command",
 ]
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Direct-command detection
+# ---------------------------------------------------------------------------
+
+# Known executable prefixes that indicate a direct shell command.
+# If the user input starts with one of these tokens (case-sensitive),
+# it is treated as a verbatim command and the LLM is bypassed.
+_DIRECT_COMMAND_PREFIXES: tuple[str, ...] = (
+    "python",
+    "python3",
+    "pytest",
+    "npm",
+    "npx",
+    "node",
+    "go",
+    "make",
+    "bash",
+    "sh",
+    "zsh",
+    "./",
+    "docker",
+    "docker-compose",
+    "cargo",
+    "mvn",
+    "gradle",
+    "java",
+    "javac",
+    "ruby",
+    "bundle",
+    "perl",
+    "php",
+    "dotnet",
+    "cmake",
+    "gcc",
+    "g++",
+    "clang",
+    "rustc",
+    "ls",
+    "cat",
+    "cd",
+    "grep",
+    "find",
+    "which",
+    "echo",
+    "env",
+    "export",
+    "pip",
+    "pip3",
+    "uv",
+    "poetry",
+)
+
+
+def is_direct_command(text: str) -> bool:
+    """Determine whether *text* looks like a direct shell command.
+
+    A direct command starts with a known executable name (e.g. ``python``,
+    ``pytest``, ``./``) or a path separator, meaning the user typed an
+    exact command rather than natural language that needs LLM translation.
+
+    The check is intentionally conservative: if in doubt, return ``False``
+    so the LLM can translate the ambiguous input.
+
+    Args:
+        text: The raw user input string.
+
+    Returns:
+        ``True`` if *text* appears to be a verbatim shell command.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    first_token = stripped.split()[0]
+
+    # Absolute or explicit relative path (e.g. /usr/bin/pytest, ./run.sh)
+    if first_token.startswith("/") or first_token.startswith("./"):
+        return True
+
+    # Known executable prefix (exact match on the first whitespace-delimited token)
+    return first_token in _DIRECT_COMMAND_PREFIXES
 
 
 # ---------------------------------------------------------------------------
@@ -105,9 +201,15 @@ class RequestHandlerConfig:
     Attributes:
         wiki_root: Path to the wiki root directory. Used to initialize
             the CommandQueue for enqueue operations.
+        llm_client: Optional OpenAI client pre-configured for Dataiku Mesh.
+            When ``None``, LLM translation is disabled and natural-language
+            input is used as-is (backward-compatible behavior).
+        llm_config: Optional LLMConfig required when *llm_client* is set.
     """
 
     wiki_root: Path
+    llm_client: OpenAI | None = None
+    llm_config: LLMConfig | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +318,25 @@ class RequestHandler:
         self._output_buffer: list[str] = []
         self._output_lock = asyncio.Lock()
         self._output_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+        # LLM command translator -- optional, None when env vars are not set.
+        self._command_translator: CommandTranslator | None = None
+        if config.llm_client is not None and config.llm_config is not None:
+            from jules_daemon.llm.command_translator import (
+                CommandTranslator as _CT,
+            )
+
+            self._command_translator = _CT(
+                client=config.llm_client,
+                config=config.llm_config,
+            )
+            logger.info("LLM command translator initialized")
+        else:
+            logger.info(
+                "LLM command translator not configured -- "
+                "natural-language input will be used as-is"
+            )
+
         self._verb_dispatch: dict[str, _VerbHandler] = {
             "handshake": self._handle_handshake,
             "queue": self._handle_queue,
@@ -334,6 +455,163 @@ class RequestHandler:
             None, functools.partial(func, *args)
         )
 
+    # -- LLM translation helper --
+
+    async def _translate_via_llm(
+        self,
+        *,
+        natural_language: str,
+        target_host: str,
+        target_user: str,
+        target_port: int,
+    ) -> str:
+        """Translate natural-language input to a shell command via the LLM.
+
+        If the LLM translator is not configured (env vars missing) or the
+        LLM call fails for any reason, the original *natural_language* text
+        is returned as-is with a warning log. This guarantees the daemon
+        never crashes due to an LLM issue.
+
+        Wiki translation history for the target host is included as extra
+        context so the LLM can make better guesses based on past commands.
+
+        Args:
+            natural_language: The user's free-text request.
+            target_host: Remote hostname or IP.
+            target_user: SSH username.
+            target_port: SSH port number.
+
+        Returns:
+            A concrete shell command string (either LLM-translated or the
+            original input as fallback).
+        """
+        if self._command_translator is None:
+            logger.debug(
+                "LLM not configured, using input as-is: %s",
+                natural_language[:80],
+            )
+            return natural_language
+
+        # Build host context with wiki history for better translation
+        extra_context = self._build_wiki_context(
+            target_host=target_host,
+        )
+
+        from jules_daemon.llm.prompts import HostContext
+
+        host_context = HostContext(
+            hostname=target_host,
+            user=target_user,
+            port=target_port,
+            extra_context=tuple(extra_context),
+        )
+
+        try:
+            # The translator is synchronous (blocking LLM HTTP call).
+            # Run it in the thread pool to avoid stalling the event loop.
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    self._command_translator.translate,
+                    natural_language=natural_language,
+                    host_context=host_context,
+                ),
+            )
+
+            if result.is_refusal:
+                logger.warning(
+                    "LLM refused to translate '%s': %s",
+                    natural_language[:80],
+                    result.response.explanation,
+                )
+                return natural_language
+
+            if result.command_count == 0:
+                logger.warning(
+                    "LLM returned 0 commands for '%s', using input as-is",
+                    natural_language[:80],
+                )
+                return natural_language
+
+            # Use the first command from the LLM response.
+            # Multiple commands are joined with && for sequential execution.
+            commands = [cmd.command for cmd in result.ssh_commands]
+            translated = " && ".join(commands)
+
+            logger.info(
+                "LLM translated '%s' -> '%s' (confidence=%s, %.2fs)",
+                natural_language[:60],
+                translated[:80],
+                result.response.confidence.value,
+                result.elapsed_seconds,
+            )
+            return translated
+
+        except Exception as exc:
+            # Never let LLM failures block command execution.
+            # Fall back to using the raw input.
+            logger.warning(
+                "LLM translation failed for '%s', using input as-is: %s",
+                natural_language[:80],
+                exc,
+            )
+            return natural_language
+
+    def _build_wiki_context(
+        self,
+        *,
+        target_host: str,
+    ) -> list[str]:
+        """Gather wiki translation history for the target host.
+
+        Returns a list of context strings suitable for inclusion in the
+        LLM prompt's ``extra_context`` field. Reads from the wiki
+        translation store; returns an empty list if the wiki is empty
+        or an error occurs.
+
+        Args:
+            target_host: The SSH host to look up history for.
+
+        Returns:
+            List of human-readable context strings.
+        """
+        context_lines: list[str] = []
+        try:
+            from jules_daemon.wiki.command_translation import find_by_query
+
+            past = find_by_query(
+                self._config.wiki_root,
+                "",  # empty query returns nothing, so use host filter
+                ssh_host=target_host,
+                max_results=5,
+            )
+            # find_by_query with empty string returns [] -- so also try
+            # listing recent translations for this host
+            if not past:
+                from jules_daemon.wiki.command_translation import list_all
+
+                all_translations = list_all(self._config.wiki_root)
+                past = [
+                    t for t in all_translations
+                    if t.ssh_host == target_host
+                ][:5]
+
+            for t in past:
+                context_lines.append(
+                    f"Previous command on this host: "
+                    f"'{t.natural_language}' -> `{t.resolved_shell}` "
+                    f"(outcome: {t.outcome.value})"
+                )
+        except Exception as exc:
+            logger.debug(
+                "Failed to read wiki translation history for %s: %s",
+                target_host,
+                exc,
+            )
+
+        return context_lines
+
     # -- Verb handlers --
 
     def _handle_handshake(
@@ -429,9 +707,22 @@ class RequestHandler:
         natural_language = parsed.get("natural_language", "")
         target_port = parsed.get("target_port", 22)
 
-        # Use the natural_language input directly as the SSH command
-        # (explicit command path -- no LLM translation needed)
-        proposed_command = natural_language
+        # Determine the proposed command: if the input is a direct shell
+        # command (starts with a known executable), use it as-is.
+        # Otherwise, attempt LLM translation via the Dataiku Mesh endpoint.
+        if is_direct_command(natural_language):
+            proposed_command = natural_language
+            logger.debug(
+                "Input recognized as direct command, skipping LLM: %s",
+                natural_language[:80],
+            )
+        else:
+            proposed_command = await self._translate_via_llm(
+                natural_language=natural_language,
+                target_host=target_host,
+                target_user=target_user,
+                target_port=target_port,
+            )
 
         # Step 0: Check if a run is already active -- ask user to queue or cancel
         if (

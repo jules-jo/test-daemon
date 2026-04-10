@@ -138,6 +138,51 @@ def _check_crash_recovery(wiki_dir: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# LLM initialization (optional)
+# ---------------------------------------------------------------------------
+
+
+def _try_load_llm() -> tuple[Any, Any]:
+    """Attempt to load LLM client and config from environment variables.
+
+    Returns ``(client, config)`` on success, or ``(None, None)`` if the
+    required environment variables (``JULES_LLM_BASE_URL``,
+    ``JULES_LLM_API_KEY``, ``JULES_LLM_DEFAULT_MODEL``) are not set.
+
+    Never raises -- LLM is optional. Any error is logged as a warning
+    and the daemon proceeds without LLM translation.
+
+    Returns:
+        Tuple of (OpenAI client, LLMConfig), or (None, None).
+    """
+    if not os.environ.get("JULES_LLM_BASE_URL"):
+        logger.warning(
+            "JULES_LLM_BASE_URL not set -- LLM command translation disabled. "
+            "Natural-language input will be used as-is."
+        )
+        return None, None
+
+    try:
+        from jules_daemon.llm.config import load_config_from_env
+        from jules_daemon.llm.client import create_client
+
+        config = load_config_from_env()
+        client = create_client(config)
+        logger.info(
+            "LLM client initialized (base_url=%s, model=%s)",
+            config.base_url,
+            config.default_model,
+        )
+        return client, config
+    except Exception as exc:
+        logger.warning(
+            "Failed to initialize LLM client, translation disabled: %s",
+            exc,
+        )
+        return None, None
+
+
+# ---------------------------------------------------------------------------
 # Main async loop
 # ---------------------------------------------------------------------------
 
@@ -195,8 +240,13 @@ async def _run_daemon(
     if startup_result.error:
         logger.warning("Startup warning: %s", startup_result.error)
 
-    # Step 4: Set up IPC server
-    handler_config = RequestHandlerConfig(wiki_root=wiki_dir)
+    # Step 4: Set up IPC server (with optional LLM translation)
+    llm_client, llm_config = _try_load_llm()
+    handler_config = RequestHandlerConfig(
+        wiki_root=wiki_dir,
+        llm_client=llm_client,
+        llm_config=llm_config,
+    )
     handler = RequestHandler(config=handler_config)
 
     server_config = ServerConfig(socket_path=socket_path)
