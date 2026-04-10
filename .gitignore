@@ -24,3 +24,26 @@ htmlcov/
 # SSH credentials (passwords)
 ssh_credentials.yaml
 ssh_credentials.yml
+
+# SSH keys (never commit private keys)
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+id_ecdsa
+id_ecdsa.pub
+*.pem
+*.key
+*.ppk
+known_hosts
+
+# Log files (may contain sensitive data)
+*.log
+logs/
+
+# Wiki data (user-specific, may contain credentials references)
+.jules/
+wiki/pages/daemon/translations/
+wiki/pages/daemon/runs/
+wiki/pages/daemon/history/
+wiki/pages/daemon/audit/
