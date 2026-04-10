@@ -433,6 +433,39 @@ class RequestHandler:
         # (explicit command path -- no LLM translation needed)
         proposed_command = natural_language
 
+        # Step 0: Check if a run is already active -- queue if so
+        if (
+            self._current_task is not None
+            and not self._current_task.done()
+        ):
+            logger.info(
+                "Run already active (run_id=%s). Queuing command: %s",
+                self._current_run_id,
+                proposed_command[:80],
+            )
+            queued = self._queue.enqueue(
+                natural_language=proposed_command,
+                ssh_host=target_host,
+                ssh_user=target_user,
+                ssh_port=target_port,
+            )
+            position = self._queue.size()
+            return _build_success_response(
+                msg_id=msg_id,
+                verb="run",
+                extra={
+                    "status": "queued",
+                    "queue_id": queued.queue_id,
+                    "position": position,
+                    "current_run_id": self._current_run_id,
+                    "message": (
+                        f"A test is already running (run_id={self._current_run_id}). "
+                        f"Your command has been queued at position {position}. "
+                        f"It will start automatically when the current run finishes."
+                    ),
+                },
+            )
+
         # Step 1: Send CONFIRM_PROMPT to the CLI
         confirm_msg_id = f"confirm-{uuid.uuid4().hex[:12]}"
         confirm_prompt = MessageEnvelope(
