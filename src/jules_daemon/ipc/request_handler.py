@@ -65,6 +65,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from jules_daemon.audit.models import AuditRecord
+from jules_daemon.audit.run_audit_builder import (
+    AUDIT_OUTPUT_LIMIT,
+    build_confirmation_record,
+    build_nl_input_record,
+    build_parsed_command_record,
+    build_ssh_execution_record,
+    build_structured_result_record,
+    create_initial_audit,
+    safe_write_audit_async,
+    truncate_text,
+)
 from jules_daemon.execution.collision_check import (
     check_remote_processes,
     format_collision_warning,
@@ -722,10 +734,38 @@ class RequestHandler:
         natural_language = parsed.get("natural_language", "")
         target_port = parsed.get("target_port", 22)
 
+        # Pre-generate the run_id so it can be referenced from the audit
+        # record before the background task is spawned. The _current_run_id
+        # is only assigned after approval; audit records need the link
+        # from the very first stage (NL input).
+        provisional_run_id = f"run-{uuid.uuid4().hex[:12]}"
+
+        # Build the NL input audit record and seed the full-chain
+        # AuditRecord. Failures in audit construction must never crash
+        # the run -- we fall back to ``audit = None`` and continue.
+        audit: AuditRecord | None = None
+        try:
+            nl_input = build_nl_input_record(
+                raw_input=natural_language,
+                source="ipc",
+            )
+            audit = create_initial_audit(
+                run_id=provisional_run_id,
+                nl_input=nl_input,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Failed to build NL input audit record for msg_id=%s: %s",
+                msg_id,
+                exc,
+            )
+            audit = None
+
         # Determine the proposed command: if the input is a direct shell
         # command (starts with a known executable), use it as-is.
         # Otherwise, attempt LLM translation via the Dataiku Mesh endpoint.
-        if is_direct_command(natural_language):
+        direct_command = is_direct_command(natural_language)
+        if direct_command:
             proposed_command = natural_language
             logger.debug(
                 "Input recognized as direct command, skipping LLM: %s",
@@ -738,6 +778,28 @@ class RequestHandler:
                 target_user=target_user,
                 target_port=target_port,
             )
+
+        # Append the parsed-command stage to the audit chain. Empty
+        # proposed commands (which would violate the record's own
+        # validation) are skipped -- audit remains partial rather
+        # than crashing the run.
+        if audit is not None and proposed_command.strip():
+            try:
+                parsed_record = build_parsed_command_record(
+                    natural_language=natural_language,
+                    resolved_shell=proposed_command,
+                    is_direct_command=direct_command,
+                    model_id=(
+                        self._config.llm_config.default_model
+                        if self._config.llm_config is not None
+                        else None
+                    ),
+                )
+                audit = audit.with_parsed_command(parsed_record)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "Failed to build parsed command audit record: %s", exc,
+                )
 
         # Step 0: Check if a run is already active -- ask user to queue or cancel
         if (
@@ -930,6 +992,31 @@ class RequestHandler:
                 msg_id,
                 target_host,
             )
+            # Append the denial to the audit chain and persist a
+            # partial record. Denials are audit-worthy events even
+            # though no SSH execution takes place.
+            if audit is not None:
+                try:
+                    denied_confirmation = build_confirmation_record(
+                        original_command=(
+                            proposed_command if proposed_command.strip()
+                            else natural_language
+                        ),
+                        final_command="",
+                        approved=False,
+                        edited=False,
+                    )
+                    audit = audit.with_confirmation(denied_confirmation)
+                    await safe_write_audit_async(
+                        wiki_root=self._config.wiki_root,
+                        record=audit,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "Failed to persist denied audit for msg_id=%s: %s",
+                        msg_id,
+                        exc,
+                    )
             return _build_success_response(
                 msg_id=msg_id,
                 verb="run",
@@ -942,6 +1029,7 @@ class RequestHandler:
 
         # If the user edited the command, use the edited version
         edited_command = reply.payload.get("edited_command")
+        command_was_edited = False
         if edited_command:
             logger.info(
                 "User edited command for msg_id=%s: '%s' -> '%s'",
@@ -949,7 +1037,28 @@ class RequestHandler:
                 proposed_command[:80],
                 edited_command[:80],
             )
+            command_was_edited = True
             proposed_command = edited_command
+
+        # Append the confirmation stage to the audit chain now that
+        # we know the user approved (possibly with edits).
+        if audit is not None and proposed_command.strip():
+            try:
+                approved_confirmation = build_confirmation_record(
+                    original_command=(
+                        audit.parsed_command.resolved_shell
+                        if audit.parsed_command is not None
+                        else proposed_command
+                    ),
+                    final_command=proposed_command,
+                    approved=True,
+                    edited=command_was_edited,
+                )
+                audit = audit.with_confirmation(approved_confirmation)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "Failed to build approved confirmation audit: %s", exc,
+                )
 
         logger.info(
             "Run approved for msg_id=%s: '%s' on %s@%s:%d",
@@ -1082,6 +1191,31 @@ class RequestHandler:
                     "Run denied after collision warning for msg_id=%s",
                     msg_id,
                 )
+                # Replace the prior APPROVED confirmation with a
+                # DENIED one -- the user approved the command but
+                # then backed out after seeing the collision warning.
+                if audit is not None:
+                    try:
+                        denied_confirmation = build_confirmation_record(
+                            original_command=(
+                                audit.parsed_command.resolved_shell
+                                if audit.parsed_command is not None
+                                else proposed_command
+                            ),
+                            final_command="",
+                            approved=False,
+                            edited=False,
+                        )
+                        audit = audit.with_confirmation(denied_confirmation)
+                        await safe_write_audit_async(
+                            wiki_root=self._config.wiki_root,
+                            record=audit,
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning(
+                            "Failed to persist collision-denied audit: %s",
+                            exc,
+                        )
                 return _build_success_response(
                     msg_id=msg_id,
                     verb="run",
@@ -1094,8 +1228,10 @@ class RequestHandler:
                     },
                 )
 
-        # Step 5: Generate run_id and spawn background task
-        run_id = f"run-{uuid.uuid4().hex[:12]}"
+        # Step 5: Reuse the provisional run_id generated at the start of
+        # the handler so the audit record (seeded in the NL input stage)
+        # stays correlated with the actual background run.
+        run_id = provisional_run_id
 
         # Send "connecting" status to CLI
         connecting_msg = MessageEnvelope(
@@ -1119,7 +1255,10 @@ class RequestHandler:
         # Clear the previous completed run -- a new run is starting
         self._last_completed_run = None
 
-        # Spawn execute_run as a background task
+        # Spawn execute_run as a background task. The audit record
+        # carries the NL/parsed/confirmation stages forward into
+        # the background task, which will append the SSH execution
+        # and structured result stages and persist the full chain.
         self._current_run_id = run_id
         self._current_task = asyncio.create_task(
             self._background_execute(
@@ -1127,6 +1266,7 @@ class RequestHandler:
                 target_user=target_user,
                 command=proposed_command,
                 target_port=target_port,
+                audit=audit,
             ),
             name=f"run-{run_id}",
         )
@@ -1151,6 +1291,7 @@ class RequestHandler:
         target_user: str,
         command: str,
         target_port: int,
+        audit: AuditRecord | None = None,
     ) -> RunResult:
         """Run execute_run in the background, handling exceptions gracefully.
 
@@ -1160,11 +1301,22 @@ class RequestHandler:
         After execution completes (success or failure), checks the queue
         and auto-starts the next queued command if one is available.
 
+        If an ``audit`` record is supplied, the SSH execution and
+        structured result stages are appended and the full chain is
+        persisted to ``pages/daemon/audit``. Audit persistence failures
+        are logged but never block execution.
+
         Args:
             target_host: Remote hostname or IP address.
             target_user: SSH username.
             command: Shell command string to execute.
             target_port: SSH port number.
+            audit: Optional partial :class:`AuditRecord` carrying the
+                NL input, parsed command, and confirmation stages.
+                When provided, the SSH execution and structured
+                result stages are appended after ``execute_run``
+                completes (regardless of success or failure) and
+                the full chain is written to the wiki.
 
         Returns:
             RunResult from the execution pipeline.
@@ -1280,6 +1432,27 @@ class RequestHandler:
                 error=str(exc),
             )
 
+        # Finalize the full-chain audit record with the SSH execution
+        # and structured result stages, then persist to the wiki.
+        # All exceptions in this block are swallowed so audit failures
+        # can never affect the run outcome or crash the daemon.
+        if audit is not None:
+            try:
+                await self._finalize_and_write_audit(
+                    audit=audit,
+                    result=result,
+                    command=command,
+                    target_host=target_host,
+                    target_user=target_user,
+                    target_port=target_port,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "Failed to finalize audit for run_id=%s: %s",
+                    result.run_id,
+                    exc,
+                )
+
         # Store the last completed run so `status` can report it even
         # after promote_run() clears the wiki current-run state.
         self._last_completed_run = result
@@ -1294,6 +1467,109 @@ class RequestHandler:
         self._try_start_next_queued()
 
         return result
+
+    async def _finalize_and_write_audit(
+        self,
+        *,
+        audit: AuditRecord,
+        result: RunResult,
+        command: str,
+        target_host: str,
+        target_user: str,
+        target_port: int,
+    ) -> None:
+        """Append the SSH execution and result stages and persist the audit.
+
+        Builds the :class:`SSHExecutionRecord` from the run result's
+        connection details and the :class:`StructuredResultRecord` from
+        the success flag, exit code, and any error message. The caller's
+        ``audit`` argument is treated as immutable -- each stage
+        transition returns a new record. The final full-chain record
+        is aligned to ``result.run_id`` so the audit file correlates
+        with the wiki history entry.
+
+        Stdout and stderr are truncated via :func:`truncate_text` and
+        embedded in the ``summary`` / ``error_message`` fields (the
+        current :class:`SSHExecutionRecord` schema has no dedicated
+        output fields). Passwords are never referenced in this path --
+        only the host, user, port, and command strings are consumed.
+
+        Args:
+            audit: The partial audit record carrying NL input, parsed
+                command, and confirmation stages.
+            result: The final :class:`RunResult` from ``execute_run``.
+            command: The final shell command that was dispatched.
+            target_host: Remote hostname or IP address.
+            target_user: SSH username used to connect.
+            target_port: SSH port number.
+        """
+        from dataclasses import replace as dataclass_replace
+
+        # Align the audit record's run_id with the wiki history so
+        # downstream queries can correlate by a single identifier.
+        if result.run_id and result.run_id != audit.run_id:
+            audit = dataclass_replace(audit, run_id=result.run_id)
+
+        ssh_record = build_ssh_execution_record(
+            host=target_host or "unknown",
+            user=target_user or "unknown",
+            port=target_port,
+            command=command or "(empty)",
+            session_id=result.run_id or audit.run_id or "unknown",
+            started_at=result.started_at,
+            completed_at=result.completed_at,
+            exit_code=result.exit_code,
+            duration_seconds=result.duration_seconds,
+        )
+        audit = audit.with_ssh_execution(ssh_record)
+
+        # Build a concise outcome summary. We include the exit code
+        # when available, a truncated tail of stdout on success, and
+        # a truncated tail of stderr on failure. Truncation keeps
+        # audit files under control even for pathological output.
+        # The section separator intentionally avoids ``---`` because
+        # YAML would interpret that as a document break inside the
+        # frontmatter.
+        stdout_tail = truncate_text(result.stdout, AUDIT_OUTPUT_LIMIT)
+        stderr_tail = truncate_text(result.stderr, AUDIT_OUTPUT_LIMIT)
+        section_sep = "\n\n=== "
+        if result.success:
+            summary = (
+                f"Command exited with code {result.exit_code}"
+                if result.exit_code is not None
+                else "Command completed successfully"
+            )
+            if stdout_tail:
+                summary = f"{summary}{section_sep}stdout ===\n{stdout_tail}"
+            error_message: str | None = None
+        else:
+            exit_fragment = (
+                f"exit code {result.exit_code}"
+                if result.exit_code is not None
+                else "no exit code (connection failure)"
+            )
+            summary = f"Command failed ({exit_fragment})"
+            error_parts: list[str] = []
+            if result.error:
+                error_parts.append(result.error)
+            if stderr_tail:
+                error_parts.append(f"=== stderr ===\n{stderr_tail}")
+            elif stdout_tail:
+                error_parts.append(f"=== stdout ===\n{stdout_tail}")
+            error_message = "\n\n".join(error_parts) if error_parts else None
+
+        structured = build_structured_result_record(
+            success=result.success,
+            exit_code=result.exit_code,
+            summary=summary,
+            error_message=error_message,
+        )
+        audit = audit.with_structured_result(structured)
+
+        await safe_write_audit_async(
+            wiki_root=self._config.wiki_root,
+            record=audit,
+        )
 
     def _try_start_next_queued(self) -> None:
         """Check the queue and spawn the next command if available.
@@ -1319,15 +1595,76 @@ class RequestHandler:
 
         run_id = f"run-{uuid.uuid4().hex[:12]}"
         self._current_run_id = run_id
+
+        # Seed a partial audit record for the queued run. The user
+        # already gave explicit consent when they queued the command,
+        # so we record an APPROVED confirmation with a synthetic
+        # approver identity so readers can distinguish queued auto-
+        # starts from interactive confirmations.
+        queued_audit: AuditRecord | None = None
+        try:
+            queued_audit = self._build_queued_audit(
+                run_id=run_id,
+                command=next_cmd.natural_language,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Failed to build audit for queued run %s: %s",
+                run_id,
+                exc,
+            )
+
         self._current_task = asyncio.create_task(
             self._background_execute(
                 target_host=next_cmd.ssh_host or "",
                 target_user=next_cmd.ssh_user or "",
                 command=next_cmd.natural_language,
                 target_port=next_cmd.ssh_port,
+                audit=queued_audit,
             ),
             name=f"run-{run_id}",
         )
+
+    def _build_queued_audit(
+        self,
+        *,
+        run_id: str,
+        command: str,
+    ) -> AuditRecord | None:
+        """Construct a partial audit record for an auto-started queued run.
+
+        Queued runs bypass the interactive confirmation loop because
+        the user already agreed to execute them when they opted into
+        queueing. To keep audit coverage uniform, we still record:
+        NL input, a parsed-command entry (treated as a direct command),
+        and an APPROVED confirmation attributed to ``"queue-autostart"``.
+
+        Returns ``None`` on any error so the queued run is not blocked.
+        """
+        if not command.strip():
+            return None
+
+        nl_record = build_nl_input_record(
+            raw_input=command,
+            source="queue",
+        )
+        audit = create_initial_audit(run_id=run_id, nl_input=nl_record)
+        parsed = build_parsed_command_record(
+            natural_language=command,
+            resolved_shell=command,
+            is_direct_command=True,
+            model_id=None,
+        )
+        audit = audit.with_parsed_command(parsed)
+        confirmation = build_confirmation_record(
+            original_command=command,
+            final_command=command,
+            approved=True,
+            edited=False,
+            decided_by="queue-autostart",
+        )
+        audit = audit.with_confirmation(confirmation)
+        return audit
 
     # -- Client I/O helpers for multi-message flows --
 
