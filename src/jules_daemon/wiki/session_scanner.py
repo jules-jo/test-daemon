@@ -269,16 +269,36 @@ def _extract_session_entry(
 
 
 def _discover_wiki_files(wiki_root: Path) -> list[Path]:
-    """Recursively discover all .md files under the wiki pages directory.
+    """Recursively discover session .md files under the wiki pages directory.
 
     Only searches under pages/ to avoid scanning raw/, schema/, etc.
+    Skips subdirectories that don't contain session files (audit,
+    translations, history, runs, knowledge) to avoid parsing files
+    that are intentionally large or have malformed YAML.
+
     Returns files sorted by path for deterministic ordering.
     """
     pages_dir = wiki_root / "pages"
     if not pages_dir.is_dir():
         return []
-    files = sorted(pages_dir.rglob("*.md"))
-    return files
+
+    # Directories to skip: these contain non-session wiki files
+    _SKIP_SUBDIRS = frozenset({
+        "audit",
+        "translations",
+        "history",
+        "runs",
+        "knowledge",
+    })
+
+    files: list[Path] = []
+    for md_file in pages_dir.rglob("*.md"):
+        # Skip if any parent directory name is in the skip list
+        if any(part in _SKIP_SUBDIRS for part in md_file.relative_to(pages_dir).parts):
+            continue
+        files.append(md_file)
+
+    return sorted(files)
 
 
 def _try_parse_session(

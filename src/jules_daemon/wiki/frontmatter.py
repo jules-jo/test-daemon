@@ -45,16 +45,32 @@ def parse(raw: str) -> WikiDocument:
             "Document must start with YAML frontmatter delimiter '---'"
         )
 
-    # Find the closing fence (index() raises ValueError if not found)
-    try:
-        end_idx = stripped.index(_FENCE, len(_FENCE))
-    except ValueError:
+    # Find the closing fence -- must be '---' on its own line, not an
+    # occurrence of '---' inside a YAML string value. Split lines and
+    # find the first line after the opening fence that is exactly '---'.
+    lines = stripped.split("\n")
+    if len(lines) < 2 or lines[0].strip() != _FENCE:
+        raise ValueError(
+            "Document must start with YAML frontmatter delimiter '---'"
+        )
+
+    end_line_idx = None
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == _FENCE:
+            end_line_idx = idx
+            break
+
+    if end_line_idx is None:
         raise ValueError("Missing closing YAML frontmatter delimiter '---'")
 
-    yaml_block = stripped[len(_FENCE) : end_idx].strip()
-    body = stripped[end_idx + len(_FENCE) :].strip()
+    yaml_block = "\n".join(lines[1:end_line_idx]).strip()
+    body = "\n".join(lines[end_line_idx + 1 :]).strip()
 
-    frontmatter = yaml.safe_load(yaml_block) or {}
+    try:
+        frontmatter = yaml.safe_load(yaml_block) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid YAML frontmatter: {exc}") from exc
+
     if not isinstance(frontmatter, dict):
         raise ValueError(
             f"Frontmatter must be a YAML mapping, got {type(frontmatter).__name__}"
