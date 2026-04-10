@@ -27,6 +27,8 @@ Directory structure:
             audit-{event_id}.md
         queue/                       # Daemon-managed: pending command queue
           {seq}-{run_id}.md
+        knowledge/                   # Daemon-managed: per-test learned knowledge
+          test-{slug}.md
       agents/                        # User-managed: agent documentation
       architecture/                  # User-managed: architecture notes
       concepts/                      # User-managed: general concepts
@@ -198,6 +200,11 @@ DAEMON_MANAGED_DIRS: tuple[WikiDirectory, ...] = (
         relative_path="pages/daemon/queue",
         kind=DirectoryKind.DAEMON_MANAGED,
         description="Pending command queue (one file per queued command)",
+    ),
+    WikiDirectory(
+        relative_path="pages/daemon/knowledge",
+        kind=DirectoryKind.DAEMON_MANAGED,
+        description="Per-test learned knowledge (one file per known test command)",
     ),
 )
 

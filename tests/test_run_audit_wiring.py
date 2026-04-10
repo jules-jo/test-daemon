@@ -761,6 +761,316 @@ class TestFinalizeAndWriteAudit:
 # ---------------------------------------------------------------------------
 
 
+class TestKnowledgeWiringInAudit:
+    """Verify the wiki knowledge loop integrates with the audit flow."""
+
+    def _make_partial_audit(self, *, command: str = "pytest") -> AuditRecord:
+        nl = build_nl_input_record(raw_input=command)
+        audit = create_initial_audit(run_id="run-knowledge", nl_input=nl)
+        audit = audit.with_parsed_command(
+            build_parsed_command_record(
+                natural_language=command,
+                resolved_shell=command,
+                is_direct_command=True,
+                model_id=None,
+            )
+        )
+        audit = audit.with_confirmation(
+            build_confirmation_record(
+                original_command=command,
+                final_command=command,
+                approved=True,
+                edited=False,
+            )
+        )
+        return audit
+
+    @pytest.mark.asyncio
+    async def test_first_run_writes_knowledge_file_when_llm_present(
+        self, tmp_path: Path
+    ) -> None:
+        """When the LLM client returns observations, a knowledge file is created."""
+        from jules_daemon.wiki.test_knowledge import (
+            derive_test_slug,
+            knowledge_file_path,
+            load_test_knowledge,
+        )
+
+        # Lightweight stub for both the summarizer and the extractor
+        # calls. Both modules read the same client; the response is
+        # JSON that satisfies both prompts (extra fields are ignored).
+        class _Resp:
+            def __init__(self, content: str) -> None:
+                self.choices = [
+                    type(
+                        "_C",
+                        (),
+                        {
+                            "message": type(
+                                "_M", (), {"content": content}
+                            )()
+                        },
+                    )()
+                ]
+
+        class _Comps:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, Any]] = []
+
+            def create(self, **kwargs: Any) -> _Resp:
+                self.calls.append(kwargs)
+                return _Resp(
+                    '{"passed": 1, "failed": 0, "skipped": 0, "total": 1, '
+                    '"key_failures": [], "narrative": "All tests passed.", '
+                    '"purpose": "runs the agent suite", '
+                    '"output_format": "iteration logs", '
+                    '"common_failures": [], '
+                    '"normal_behavior": "all iterations pass quickly"}'
+                )
+
+        class _Chat:
+            def __init__(self) -> None:
+                self.completions = _Comps()
+
+        class _Client:
+            def __init__(self) -> None:
+                self.chat = _Chat()
+
+        from jules_daemon.llm.config import LLMConfig
+
+        llm_config = LLMConfig(
+            base_url="https://example.test/v1",
+            api_key="test-key",
+            default_model="openai:default:gpt-4o",
+        )
+        client = _Client()
+        config = RequestHandlerConfig(
+            wiki_root=tmp_path,
+            llm_client=client,  # type: ignore[arg-type]
+            llm_config=llm_config,
+        )
+        handler = RequestHandler(config=config)
+        audit = self._make_partial_audit(command="python3 agent_test.py")
+        result = _make_success_result(
+            command="python3 agent_test.py",
+            stdout="iteration 1: PASSED",
+        )
+
+        await handler._finalize_and_write_audit(
+            audit=audit,
+            result=result,
+            command="python3 agent_test.py",
+            target_host="staging.example.com",
+            target_user="deploy",
+            target_port=22,
+        )
+
+        slug = derive_test_slug("python3 agent_test.py")
+        assert slug == "agent-test-py"
+        loaded = load_test_knowledge(tmp_path, slug)
+        assert loaded is not None
+        assert loaded.runs_observed == 1
+        assert loaded.purpose == "runs the agent suite"
+        # File path is in the expected location
+        path = knowledge_file_path(tmp_path, slug)
+        assert path.is_file()
+
+    @pytest.mark.asyncio
+    async def test_no_llm_client_does_not_create_knowledge_file(
+        self, tmp_path: Path
+    ) -> None:
+        """Without an LLM client, the audit still writes but no knowledge file is created."""
+        from jules_daemon.wiki.test_knowledge import (
+            derive_test_slug,
+            knowledge_file_path,
+        )
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        audit = self._make_partial_audit(command="python3 agent_test.py")
+        result = _make_success_result(command="python3 agent_test.py")
+
+        await handler._finalize_and_write_audit(
+            audit=audit,
+            result=result,
+            command="python3 agent_test.py",
+            target_host="staging.example.com",
+            target_user="deploy",
+            target_port=22,
+        )
+
+        slug = derive_test_slug("python3 agent_test.py")
+        path = knowledge_file_path(tmp_path, slug)
+        # No knowledge file because there is no existing knowledge AND
+        # no LLM client to extract from.
+        assert not path.exists()
+        # Audit still written though
+        assert len(list_audit_files(tmp_path)) == 1
+
+    @pytest.mark.asyncio
+    async def test_existing_knowledge_passes_context_to_summarizer(
+        self, tmp_path: Path
+    ) -> None:
+        """Pre-existing knowledge is loaded and embedded in the LLM prompt."""
+        from jules_daemon.wiki.test_knowledge import (
+            TestKnowledge,
+            save_test_knowledge,
+        )
+
+        # Seed the wiki with prior knowledge.
+        prior = TestKnowledge(
+            test_slug="agent-test-py",
+            command_pattern="python3 agent_test.py",
+            purpose="runs the agent end to end",
+            output_format="iteration N: PASSED|FAILED",
+            normal_behavior="all 100 iterations pass in <30s",
+            common_failures=("timeout",),
+            runs_observed=2,
+        )
+        save_test_knowledge(tmp_path, prior)
+
+        captured_prompts: list[str] = []
+
+        class _Resp:
+            def __init__(self, content: str) -> None:
+                self.choices = [
+                    type(
+                        "_C",
+                        (),
+                        {
+                            "message": type(
+                                "_M", (), {"content": content}
+                            )()
+                        },
+                    )()
+                ]
+
+        class _Comps:
+            def create(self, **kwargs: Any) -> _Resp:
+                # Capture the user prompt to verify the context block is present
+                for msg in kwargs.get("messages", []):
+                    if msg.get("role") == "user":
+                        captured_prompts.append(msg["content"])
+                return _Resp(
+                    '{"passed": 1, "failed": 0, "skipped": 0, "total": 1, '
+                    '"key_failures": [], "narrative": "All passed.", '
+                    '"purpose": "", "output_format": "", '
+                    '"common_failures": [], "normal_behavior": ""}'
+                )
+
+        class _Chat:
+            def __init__(self) -> None:
+                self.completions = _Comps()
+
+        class _Client:
+            def __init__(self) -> None:
+                self.chat = _Chat()
+
+        from jules_daemon.llm.config import LLMConfig
+
+        llm_config = LLMConfig(
+            base_url="https://example.test/v1",
+            api_key="test-key",
+            default_model="openai:default:gpt-4o",
+        )
+        client = _Client()
+        config = RequestHandlerConfig(
+            wiki_root=tmp_path,
+            llm_client=client,  # type: ignore[arg-type]
+            llm_config=llm_config,
+        )
+        handler = RequestHandler(config=config)
+        audit = self._make_partial_audit(command="python3 agent_test.py")
+        result = _make_success_result(command="python3 agent_test.py")
+
+        await handler._finalize_and_write_audit(
+            audit=audit,
+            result=result,
+            command="python3 agent_test.py",
+            target_host="staging.example.com",
+            target_user="deploy",
+            target_port=22,
+        )
+
+        # At least one prompt (summarizer) should contain the prior
+        # knowledge text. The extractor also includes it in a separate
+        # call.
+        joined = "\n".join(captured_prompts)
+        assert "runs the agent end to end" in joined
+        assert "iteration N: PASSED|FAILED" in joined
+
+    @pytest.mark.asyncio
+    async def test_knowledge_save_failure_does_not_break_audit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Wiki I/O failures during knowledge save must not break the audit."""
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        audit = self._make_partial_audit()
+        result = _make_success_result()
+
+        # Make save_test_knowledge raise to simulate disk failure.
+        from jules_daemon.ipc import request_handler as rh_module
+
+        def _boom(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("disk failure")
+
+        monkeypatch.setattr(rh_module, "save_test_knowledge", _boom)
+
+        # Must not raise
+        await handler._finalize_and_write_audit(
+            audit=audit,
+            result=result,
+            command="pytest",
+            target_host="staging.example.com",
+            target_user="deploy",
+            target_port=22,
+        )
+
+        # The audit file is still written.
+        assert len(list_audit_files(tmp_path)) == 1
+
+    @pytest.mark.asyncio
+    async def test_existing_knowledge_runs_observed_increments(
+        self, tmp_path: Path
+    ) -> None:
+        """Even without an LLM client, prior knowledge gets a run-count bump."""
+        from jules_daemon.wiki.test_knowledge import (
+            TestKnowledge,
+            load_test_knowledge,
+            save_test_knowledge,
+        )
+
+        prior = TestKnowledge(
+            test_slug="agent-test-py",
+            command_pattern="python3 agent_test.py",
+            purpose="seed",
+            runs_observed=2,
+        )
+        save_test_knowledge(tmp_path, prior)
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        audit = self._make_partial_audit(command="python3 agent_test.py")
+        result = _make_success_result(command="python3 agent_test.py")
+
+        await handler._finalize_and_write_audit(
+            audit=audit,
+            result=result,
+            command="python3 agent_test.py",
+            target_host="staging.example.com",
+            target_user="deploy",
+            target_port=22,
+        )
+
+        loaded = load_test_knowledge(tmp_path, "agent-test-py")
+        assert loaded is not None
+        assert loaded.runs_observed == 3
+        assert loaded.purpose == "seed"
+
+
 class TestQueuedAutoStartAudit:
     """Tests for :meth:`RequestHandler._build_queued_audit`."""
 

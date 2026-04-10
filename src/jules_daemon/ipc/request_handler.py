@@ -80,6 +80,7 @@ from jules_daemon.execution.collision_check import (
     check_remote_processes,
     format_collision_warning,
 )
+from jules_daemon.execution.knowledge_extractor import extract_knowledge
 from jules_daemon.execution.output_summarizer import (
     OutputSummary,
     summarize_output,
@@ -99,6 +100,13 @@ from jules_daemon.ssh.credentials import resolve_ssh_credentials
 from jules_daemon.wiki import current_run as current_run_io
 from jules_daemon.wiki.command_queue import CommandQueue
 from jules_daemon.wiki.run_promotion import list_history, read_history_entry
+from jules_daemon.wiki.test_knowledge import (
+    TestKnowledge,
+    derive_test_slug,
+    load_test_knowledge,
+    merge_knowledge,
+    save_test_knowledge,
+)
 
 # Conditional LLM imports -- these are Optional and never crash the daemon.
 # The TYPE_CHECKING guard keeps the type annotations available to type
@@ -1579,12 +1587,46 @@ class RequestHandler:
         )
         audit = audit.with_ssh_execution(ssh_record)
 
+        # Load any prior knowledge for this test from the wiki and
+        # convert it into a prompt context block. The wiki I/O is
+        # wrapped in try/except so a corrupt or missing file cannot
+        # break the audit flow.
+        test_slug, existing_knowledge = self._safe_load_test_knowledge(
+            command=command,
+        )
+        wiki_context = ""
+        if existing_knowledge is not None:
+            try:
+                wiki_context = existing_knowledge.to_prompt_context()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "Failed to format prior knowledge for slug=%s: %s",
+                    test_slug,
+                    exc,
+                )
+                wiki_context = ""
+
         # Produce a high-level summary of the command output. The
         # summarizer tries regex parsers first (pytest, unittest, jest,
         # generic iteration loops) and then optionally asks the LLM for
         # a narrative description. Any LLM error is swallowed inside
         # the summarizer so this call never crashes the audit flow.
-        summary_obj = await self._safe_summarize_output(result=result)
+        # When prior knowledge exists, it is forwarded to the LLM as a
+        # context block so the narrative can leverage past observations.
+        summary_obj = await self._safe_summarize_output(
+            result=result,
+            wiki_context=wiki_context,
+        )
+
+        # After the summary is produced, ask the LLM to extract durable
+        # observations about this test and persist them to the wiki so
+        # subsequent runs benefit from the accumulated knowledge.
+        await self._safe_extract_and_save_knowledge(
+            command=command,
+            result=result,
+            test_slug=test_slug,
+            existing_knowledge=existing_knowledge,
+        )
 
         output_summary_text = _format_output_summary(summary_obj=summary_obj)
 
@@ -1650,6 +1692,7 @@ class RequestHandler:
         self,
         *,
         result: RunResult,
+        wiki_context: str = "",
     ) -> OutputSummary:
         """Call the output summarizer without crashing the audit flow.
 
@@ -1657,6 +1700,13 @@ class RequestHandler:
         into an empty :class:`OutputSummary`. This guarantees that the
         audit record can always be written, even if the LLM client is
         misconfigured or the regex layer hits a pathological input.
+
+        Args:
+            result: The run result whose output should be summarized.
+            wiki_context: Optional formatted prior knowledge for this
+                test. Passed through to
+                :func:`summarize_output` so the LLM can leverage past
+                observations when crafting the narrative.
         """
         try:
             llm_model: str | None = None
@@ -1669,6 +1719,7 @@ class RequestHandler:
                 exit_code=result.exit_code,
                 llm_client=self._config.llm_client,
                 llm_model=llm_model,
+                wiki_context=wiki_context,
             )
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
@@ -1677,6 +1728,106 @@ class RequestHandler:
                 exc,
             )
             return OutputSummary(parser="none")
+
+    def _safe_load_test_knowledge(
+        self,
+        *,
+        command: str,
+    ) -> tuple[str, TestKnowledge | None]:
+        """Best-effort load of accumulated knowledge for *command*.
+
+        Returns a ``(slug, knowledge)`` tuple. The slug is always
+        derived (so the caller can save fresh knowledge later); the
+        knowledge value is ``None`` when no prior file exists or the
+        load failed. Wiki I/O failures never raise from this method.
+        """
+        try:
+            slug = derive_test_slug(command)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Failed to derive test slug for command %r: %s",
+                command,
+                exc,
+            )
+            return ("unknown-test", None)
+        try:
+            existing = load_test_knowledge(self._config.wiki_root, slug)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Failed to load test knowledge for slug=%s: %s",
+                slug,
+                exc,
+            )
+            existing = None
+        return (slug, existing)
+
+    async def _safe_extract_and_save_knowledge(
+        self,
+        *,
+        command: str,
+        result: RunResult,
+        test_slug: str,
+        existing_knowledge: TestKnowledge | None,
+    ) -> None:
+        """Best-effort knowledge extraction and persistence after a run.
+
+        Calls :func:`extract_knowledge` to ask the LLM for fresh
+        observations, merges them with the existing knowledge (if any),
+        and saves the result to the wiki. Every step is wrapped in
+        try/except so a wiki I/O or LLM failure cannot break the audit
+        flow.
+        """
+        if not command or not command.strip():
+            return
+        llm_model: str | None = None
+        if self._config.llm_config is not None:
+            llm_model = self._config.llm_config.default_model
+        try:
+            new_observations = await extract_knowledge(
+                command=command,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                exit_code=result.exit_code,
+                existing_knowledge=existing_knowledge,
+                llm_client=self._config.llm_client,
+                llm_model=llm_model,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Knowledge extractor failed for slug=%s: %s",
+                test_slug,
+                exc,
+            )
+            return
+
+        # When the LLM is disabled and there is no existing record,
+        # there is nothing useful to persist -- skip the save entirely.
+        if new_observations is None and existing_knowledge is None:
+            return
+
+        try:
+            merged = merge_knowledge(
+                existing_knowledge,
+                new_observations or {},
+                test_slug=test_slug,
+                command_pattern=command,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Failed to merge knowledge for slug=%s: %s",
+                test_slug,
+                exc,
+            )
+            return
+
+        try:
+            save_test_knowledge(self._config.wiki_root, merged)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Failed to save test knowledge for slug=%s: %s",
+                test_slug,
+                exc,
+            )
 
     def _try_start_next_queued(self) -> None:
         """Check the queue and spawn the next command if available.

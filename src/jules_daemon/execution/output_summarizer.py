@@ -323,18 +323,34 @@ def _build_prompt(
     command: str,
     exit_code: int | None,
     output_tail: str,
+    wiki_context: str = "",
 ) -> str:
     """Build the user prompt sent to the LLM.
 
     The prompt is deliberately explicit about the desired JSON shape so
     the model's response can be parsed reliably without ``response_format``
     (Dataiku Mesh does not support it).
+
+    When ``wiki_context`` is non-empty it is injected ahead of the test
+    output so the LLM can leverage prior accumulated knowledge about
+    this command (purpose, output format, normal behavior, common
+    failure patterns). The context block is rendered by
+    :meth:`jules_daemon.wiki.test_knowledge.TestKnowledge.to_prompt_context`.
     """
     exit_display = str(exit_code) if exit_code is not None else "(none)"
+    context_block = ""
+    if wiki_context:
+        context_block = (
+            f"{wiki_context}\n\n"
+            "Use that prior knowledge to make the narrative more "
+            "specific (mention what passed/failed relative to normal "
+            "behavior).\n\n"
+        )
     return (
         "You are analyzing the output of a test run.\n\n"
         f"Command: {command}\n"
-        f"Exit code: {exit_display}\n"
+        f"Exit code: {exit_display}\n\n"
+        f"{context_block}"
         "Output (truncated):\n"
         f"{output_tail}\n\n"
         "Extract:\n"
@@ -482,6 +498,7 @@ async def _llm_summary(
     command: str,
     exit_code: int | None,
     output_tail: str,
+    wiki_context: str = "",
 ) -> dict[str, Any] | None:
     """Async wrapper around the blocking LLM call.
 
@@ -493,6 +510,7 @@ async def _llm_summary(
         command=command,
         exit_code=exit_code,
         output_tail=output_tail,
+        wiki_context=wiki_context,
     )
     try:
         raw_text = await asyncio.wait_for(
@@ -530,6 +548,7 @@ async def summarize_output(
     exit_code: int | None,
     llm_client: Any | None = None,
     llm_model: str | None = None,
+    wiki_context: str = "",
 ) -> OutputSummary:
     """Hybrid summarization: regex first, LLM for narrative and fallback.
 
@@ -551,6 +570,13 @@ async def summarize_output(
         llm_model: Default model identifier to pass to the client.
             Required when ``llm_client`` is provided; otherwise the
             client call is skipped (treated as disabled).
+        wiki_context: Optional formatted prior knowledge about this
+            test (typically the output of
+            :meth:`jules_daemon.wiki.test_knowledge.TestKnowledge.to_prompt_context`).
+            When non-empty it is included in the LLM prompt so the
+            narrative can leverage past observations. Empty string is
+            equivalent to "no prior knowledge" and the prompt remains
+            backward-compatible.
 
     Returns:
         A frozen :class:`OutputSummary`.
@@ -583,6 +609,7 @@ async def summarize_output(
         command=command,
         exit_code=exit_code,
         output_tail=output_tail,
+        wiki_context=wiki_context,
     )
 
     narrative = ""
