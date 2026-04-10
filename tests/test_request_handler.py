@@ -342,7 +342,8 @@ class TestRequestHandlerCancelVerb:
     """Tests for cancel verb handling."""
 
     @pytest.mark.asyncio
-    async def test_cancel_returns_response(self, tmp_path: Path) -> None:
+    async def test_cancel_no_task_returns_error(self, tmp_path: Path) -> None:
+        """When no task is running, cancel returns an error."""
         config = RequestHandlerConfig(wiki_root=tmp_path)
         handler = RequestHandler(config=config)
         client = _make_client()
@@ -350,8 +351,58 @@ class TestRequestHandlerCancelVerb:
 
         response = await handler.handle_message(envelope, client)
 
+        assert response.msg_type == MessageType.ERROR
+        assert "No test is currently running" in response.payload["error"]
+
+    @pytest.mark.asyncio
+    async def test_cancel_running_task_returns_success(
+        self, tmp_path: Path
+    ) -> None:
+        """When a task is running, cancel stops it and returns success."""
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+
+        # Simulate a running task
+        async def _long_running() -> None:
+            await asyncio.sleep(3600)
+
+        handler._current_task = asyncio.create_task(_long_running())
+        handler._current_run_id = "run-test-123"
+
+        envelope = _make_request(payload={"verb": "cancel"})
+        response = await handler.handle_message(envelope, client)
+
         assert response.msg_type == MessageType.RESPONSE
         assert response.payload["verb"] == "cancel"
+        assert response.payload["status"] == "cancelled"
+        assert response.payload["run_id"] == "run-test-123"
+        assert handler._current_task is None
+        assert handler._current_run_id is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_done_task_returns_error(
+        self, tmp_path: Path
+    ) -> None:
+        """When the task is already done, cancel returns an error."""
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+
+        # Create a task that finishes immediately
+        async def _instant() -> None:
+            pass
+
+        task = asyncio.create_task(_instant())
+        await task  # Let it complete
+        handler._current_task = task
+        handler._current_run_id = "run-done-456"
+
+        envelope = _make_request(payload={"verb": "cancel"})
+        response = await handler.handle_message(envelope, client)
+
+        assert response.msg_type == MessageType.ERROR
+        assert "No test is currently running" in response.payload["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +414,10 @@ class TestRequestHandlerHistoryVerb:
     """Tests for history verb handling."""
 
     @pytest.mark.asyncio
-    async def test_history_returns_response(self, tmp_path: Path) -> None:
+    async def test_history_empty_returns_empty_list(
+        self, tmp_path: Path,
+    ) -> None:
+        """When no history files exist, returns empty records."""
         config = RequestHandlerConfig(wiki_root=tmp_path)
         handler = RequestHandler(config=config)
         client = _make_client()
@@ -373,6 +427,200 @@ class TestRequestHandlerHistoryVerb:
 
         assert response.msg_type == MessageType.RESPONSE
         assert response.payload["verb"] == "history"
+        assert response.payload["records"] == []
+        assert response.payload["total"] == 0
+
+    @pytest.mark.asyncio
+    async def test_history_reads_wiki_files(self, tmp_path: Path) -> None:
+        """History command reads and parses history wiki files."""
+        from jules_daemon.wiki.models import (
+            Command,
+            CurrentRun,
+            ProcessIDs,
+            RunStatus,
+            SSHTarget,
+        )
+        from jules_daemon.wiki.run_promotion import promote_run
+        from jules_daemon.wiki import current_run as cr_io
+
+        # Create a completed run and promote it to history
+        run = CurrentRun(
+            status=RunStatus.RUNNING,
+            run_id="abc123",
+            ssh_target=SSHTarget(host="host1.example.com", user="deploy"),
+            command=Command(
+                natural_language="run tests",
+                resolved_shell="pytest -v",
+                approved=True,
+            ),
+            pids=ProcessIDs(daemon=1234),
+        )
+        completed = run.with_completed(
+            final_progress=run.progress,
+        )
+        cr_io.write(tmp_path, completed)
+        promote_run(tmp_path, completed)
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+        envelope = _make_request(payload={"verb": "history"})
+
+        response = await handler.handle_message(envelope, client)
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["verb"] == "history"
+        assert response.payload["total"] == 1
+        records = response.payload["records"]
+        assert len(records) == 1
+        assert records[0]["run_id"] == "abc123"
+        assert records[0]["host"] == "host1.example.com"
+        assert records[0]["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_history_respects_limit(self, tmp_path: Path) -> None:
+        """History command respects the limit parameter."""
+        from jules_daemon.wiki.models import (
+            Command,
+            CurrentRun,
+            ProcessIDs,
+            RunStatus,
+            SSHTarget,
+        )
+        from jules_daemon.wiki.run_promotion import promote_run
+        from jules_daemon.wiki import current_run as cr_io
+
+        # Create and promote 3 runs
+        for i in range(3):
+            run = CurrentRun(
+                status=RunStatus.RUNNING,
+                run_id=f"run-{i}",
+                ssh_target=SSHTarget(host="host.example.com", user="deploy"),
+                command=Command(
+                    natural_language=f"test {i}",
+                    resolved_shell=f"pytest test_{i}.py",
+                    approved=True,
+                ),
+                pids=ProcessIDs(daemon=1234),
+            )
+            completed = run.with_completed(final_progress=run.progress)
+            cr_io.write(tmp_path, completed)
+            promote_run(tmp_path, completed)
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+        envelope = _make_request(payload={
+            "verb": "history",
+            "limit": 2,
+        })
+
+        response = await handler.handle_message(envelope, client)
+
+        assert response.payload["total"] == 3
+        assert len(response.payload["records"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_history_filters_by_status(self, tmp_path: Path) -> None:
+        """History command filters by status_filter."""
+        from jules_daemon.wiki.models import (
+            Command,
+            CurrentRun,
+            ProcessIDs,
+            Progress,
+            RunStatus,
+            SSHTarget,
+        )
+        from jules_daemon.wiki.run_promotion import promote_run
+        from jules_daemon.wiki import current_run as cr_io
+
+        # Create a completed run
+        run1 = CurrentRun(
+            status=RunStatus.RUNNING,
+            run_id="completed-run",
+            ssh_target=SSHTarget(host="host.example.com", user="deploy"),
+            command=Command(
+                natural_language="test ok",
+                resolved_shell="pytest",
+                approved=True,
+            ),
+            pids=ProcessIDs(daemon=1234),
+        )
+        completed = run1.with_completed(final_progress=run1.progress)
+        cr_io.write(tmp_path, completed)
+        promote_run(tmp_path, completed)
+
+        # Create a failed run
+        run2 = CurrentRun(
+            status=RunStatus.RUNNING,
+            run_id="failed-run",
+            ssh_target=SSHTarget(host="host.example.com", user="deploy"),
+            command=Command(
+                natural_language="test fail",
+                resolved_shell="pytest",
+                approved=True,
+            ),
+            pids=ProcessIDs(daemon=1234),
+        )
+        failed = run2.with_failed("exit code 1", Progress())
+        cr_io.write(tmp_path, failed)
+        promote_run(tmp_path, failed)
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+
+        # Filter for completed only
+        envelope = _make_request(payload={
+            "verb": "history",
+            "status_filter": "completed",
+        })
+        response = await handler.handle_message(envelope, client)
+
+        assert response.payload["total"] == 1
+        assert response.payload["records"][0]["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_history_filters_by_host(self, tmp_path: Path) -> None:
+        """History command filters by host_filter."""
+        from jules_daemon.wiki.models import (
+            Command,
+            CurrentRun,
+            ProcessIDs,
+            RunStatus,
+            SSHTarget,
+        )
+        from jules_daemon.wiki.run_promotion import promote_run
+        from jules_daemon.wiki import current_run as cr_io
+
+        for host in ["alpha.example.com", "beta.example.com"]:
+            run = CurrentRun(
+                status=RunStatus.RUNNING,
+                run_id=f"run-{host}",
+                ssh_target=SSHTarget(host=host, user="deploy"),
+                command=Command(
+                    natural_language="test",
+                    resolved_shell="pytest",
+                    approved=True,
+                ),
+                pids=ProcessIDs(daemon=1234),
+            )
+            completed = run.with_completed(final_progress=run.progress)
+            cr_io.write(tmp_path, completed)
+            promote_run(tmp_path, completed)
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+        envelope = _make_request(payload={
+            "verb": "history",
+            "host_filter": "alpha.example.com",
+        })
+
+        response = await handler.handle_message(envelope, client)
+
+        assert response.payload["total"] == 1
+        assert response.payload["records"][0]["host"] == "alpha.example.com"
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +632,10 @@ class TestRequestHandlerWatchVerb:
     """Tests for watch verb handling."""
 
     @pytest.mark.asyncio
-    async def test_watch_returns_response(self, tmp_path: Path) -> None:
+    async def test_watch_no_active_run_returns_no_active_run(
+        self, tmp_path: Path,
+    ) -> None:
+        """When no task is running and no buffer exists, returns no_active_run."""
         config = RequestHandlerConfig(wiki_root=tmp_path)
         handler = RequestHandler(config=config)
         client = _make_client()
@@ -394,6 +645,46 @@ class TestRequestHandlerWatchVerb:
 
         assert response.msg_type == MessageType.RESPONSE
         assert response.payload["verb"] == "watch"
+        assert response.payload["status"] == "no_active_run"
+
+    @pytest.mark.asyncio
+    async def test_watch_streams_buffered_output(
+        self, tmp_path: Path,
+    ) -> None:
+        """Watch sends buffered lines and completes when task is done."""
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+
+        # Pre-fill the output buffer with some lines
+        handler._output_buffer = ["line 1\n", "line 2\n"]
+
+        # Create a task that is already done
+        async def _instant() -> None:
+            pass
+
+        task = asyncio.create_task(_instant())
+        await task
+        handler._current_task = task
+        handler._current_run_id = "run-watch-test"
+
+        # Collect frames sent to the mock writer
+        sent_frames: list[bytes] = []
+        client = _make_client()
+        original_write = client.writer.write
+
+        def _capture_write(data: bytes) -> None:
+            sent_frames.append(data)
+
+        client.writer.write = _capture_write
+
+        envelope = _make_request(payload={"verb": "watch"})
+        response = await handler.handle_message(envelope, client)
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["verb"] == "watch"
+        assert response.payload["status"] == "completed"
+        # Should have sent at least the 2 buffered lines + end-of-stream
+        assert len(sent_frames) >= 3
 
 
 # ---------------------------------------------------------------------------

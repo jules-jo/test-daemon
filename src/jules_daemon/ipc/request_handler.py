@@ -83,6 +83,7 @@ from jules_daemon.ipc.server import ClientConnection
 from jules_daemon.ssh.credentials import resolve_ssh_credentials
 from jules_daemon.wiki import current_run as current_run_io
 from jules_daemon.wiki.command_queue import CommandQueue
+from jules_daemon.wiki.run_promotion import list_history, read_history_entry
 
 __all__ = [
     "RequestHandler",
@@ -212,17 +213,20 @@ class RequestHandler:
         self._queue = CommandQueue(wiki_root=config.wiki_root)
         self._current_task: asyncio.Task[RunResult] | None = None
         self._current_run_id: str | None = None
+        self._output_buffer: list[str] = []
+        self._output_lock = asyncio.Lock()
+        self._output_queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._verb_dispatch: dict[str, _VerbHandler] = {
             "handshake": self._handle_handshake,
             "queue": self._handle_queue,
             "status": self._handle_status,
-            "watch": self._handle_watch,
             "cancel": self._handle_cancel,
             "history": self._handle_history,
         }
         # Verbs that require async client access (multi-message flows)
         self._async_client_dispatch: dict[str, _AsyncClientVerbHandler] = {
             "run": self._handle_run,
+            "watch": self._handle_watch,
         }
 
     async def handle_message(
@@ -698,6 +702,9 @@ class RequestHandler:
         On failure, writes FAILED state to the wiki so the status command
         can report it. Never allows exceptions to crash the daemon.
 
+        After execution completes (success or failure), checks the queue
+        and auto-starts the next queued command if one is available.
+
         Args:
             target_host: Remote hostname or IP address.
             target_user: SSH username.
@@ -707,6 +714,28 @@ class RequestHandler:
         Returns:
             RunResult from the execution pipeline.
         """
+        # Clear output buffer for the new run
+        async with self._output_lock:
+            self._output_buffer = []
+        # Drain any stale items from the output queue
+        while not self._output_queue.empty():
+            try:
+                self._output_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        def _on_output(line: str) -> None:
+            """Thread-safe callback for streaming output lines.
+
+            Appends to the shared buffer and puts into the asyncio queue
+            for any active watch subscribers.
+            """
+            self._output_buffer.append(line)
+            try:
+                self._output_queue.put_nowait(line)
+            except asyncio.QueueFull:
+                pass  # Best effort for watch consumers
+
         try:
             result = await execute_run(
                 target_host=target_host,
@@ -714,13 +743,13 @@ class RequestHandler:
                 command=command,
                 target_port=target_port,
                 wiki_root=self._config.wiki_root,
+                on_output=_on_output,
             )
             logger.info(
                 "Background run completed: run_id=%s success=%s",
                 result.run_id,
                 result.success,
             )
-            return result
         except Exception as exc:
             logger.error(
                 "Background run failed with unexpected error: %s",
@@ -760,9 +789,8 @@ class RequestHandler:
                     wiki_exc,
                 )
 
-            # Return a failed result rather than propagating the exception
-            from datetime import datetime, timezone
-            return RunResult(
+            # Build a failed result rather than propagating the exception
+            result = RunResult(
                 success=False,
                 run_id=self._current_run_id or "",
                 command=command,
@@ -770,6 +798,51 @@ class RequestHandler:
                 target_user=target_user,
                 error=str(exc),
             )
+
+        # Signal end-of-stream to any watch subscribers
+        try:
+            self._output_queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
+
+        # Check the queue for the next command to auto-execute
+        self._try_start_next_queued()
+
+        return result
+
+    def _try_start_next_queued(self) -> None:
+        """Check the queue and spawn the next command if available.
+
+        Dequeues the next pending command and spawns a new background
+        task for it. This creates a chain where each run checks the
+        queue on completion.
+        """
+        remaining = self._queue.size()
+        if remaining == 0:
+            return
+
+        next_cmd = self._queue.dequeue()
+        if next_cmd is None:
+            return
+
+        remaining_after = self._queue.size()
+        logger.info(
+            "Starting queued command (queue_id=%s, remaining=%d)",
+            next_cmd.queue_id,
+            remaining_after,
+        )
+
+        run_id = f"run-{uuid.uuid4().hex[:12]}"
+        self._current_run_id = run_id
+        self._current_task = asyncio.create_task(
+            self._background_execute(
+                target_host=next_cmd.ssh_host or "",
+                target_user=next_cmd.ssh_user or "",
+                command=next_cmd.natural_language,
+                target_port=next_cmd.ssh_port,
+            ),
+            name=f"run-{run_id}",
+        )
 
     # -- Client I/O helpers for multi-message flows --
 
@@ -938,21 +1011,121 @@ class RequestHandler:
             },
         )
 
-    def _handle_watch(
+    async def _handle_watch(
         self,
         msg_id: str,
         parsed: dict[str, Any],
+        client: ClientConnection,
     ) -> MessageEnvelope:
-        """Handle a watch request.
+        """Handle a watch request with streaming output.
 
-        In the full implementation, this sets up streaming output.
-        For now, returns an acknowledgment.
+        Sends buffered output lines as STREAM messages, then polls for
+        new lines every 1 second until the run completes. Sends an
+        end-of-stream STREAM message when done.
+
+        Args:
+            msg_id: Correlation ID from the original request.
+            parsed: Validated payload (currently unused).
+            client: Connection context for streaming.
+
+        Returns:
+            RESPONSE envelope after streaming completes.
         """
+        task_running = (
+            self._current_task is not None
+            and not self._current_task.done()
+        )
+
+        if not task_running and not self._output_buffer:
+            return _build_success_response(
+                msg_id=msg_id,
+                verb="watch",
+                extra={
+                    "status": "no_active_run",
+                    "message": "No test is currently running and no output is buffered",
+                },
+            )
+
+        # Step 1: Send existing buffer lines as STREAM messages
+        async with self._output_lock:
+            snapshot = list(self._output_buffer)
+        sent_count = len(snapshot)
+
+        for line in snapshot:
+            stream_msg = MessageEnvelope(
+                msg_type=MessageType.STREAM,
+                msg_id=f"watch-{uuid.uuid4().hex[:12]}",
+                timestamp=_now_iso(),
+                payload={"line": line, "is_end": False},
+            )
+            try:
+                await self._send_envelope(client, stream_msg)
+            except Exception:
+                break  # Client disconnected
+
+        # Step 2: Poll for new lines until run completes
+        while (
+            self._current_task is not None
+            and not self._current_task.done()
+        ):
+            try:
+                line = await asyncio.wait_for(
+                    self._output_queue.get(), timeout=1.0,
+                )
+            except asyncio.TimeoutError:
+                continue
+
+            if line is None:
+                # End sentinel
+                break
+
+            sent_count += 1
+            stream_msg = MessageEnvelope(
+                msg_type=MessageType.STREAM,
+                msg_id=f"watch-{uuid.uuid4().hex[:12]}",
+                timestamp=_now_iso(),
+                payload={"line": line, "is_end": False},
+            )
+            try:
+                await self._send_envelope(client, stream_msg)
+            except Exception:
+                break
+
+        # Drain any remaining items in the queue
+        while not self._output_queue.empty():
+            try:
+                line = self._output_queue.get_nowait()
+                if line is None:
+                    break
+                sent_count += 1
+                stream_msg = MessageEnvelope(
+                    msg_type=MessageType.STREAM,
+                    msg_id=f"watch-{uuid.uuid4().hex[:12]}",
+                    timestamp=_now_iso(),
+                    payload={"line": line, "is_end": False},
+                )
+                await self._send_envelope(client, stream_msg)
+            except (asyncio.QueueEmpty, Exception):
+                break
+
+        # Step 3: Send end-of-stream
+        end_msg = MessageEnvelope(
+            msg_type=MessageType.STREAM,
+            msg_id=f"watch-end-{uuid.uuid4().hex[:12]}",
+            timestamp=_now_iso(),
+            payload={"line": "", "is_end": True},
+        )
+        try:
+            await self._send_envelope(client, end_msg)
+        except Exception:
+            pass
+
         return _build_success_response(
             msg_id=msg_id,
             verb="watch",
             extra={
-                "status": "acknowledged",
+                "status": "completed",
+                "lines_sent": sent_count,
             },
         )
 
@@ -963,14 +1136,52 @@ class RequestHandler:
     ) -> MessageEnvelope:
         """Handle a cancel request.
 
-        In the full implementation, this signals the running process
-        or removes a queued command. For now, returns acknowledgment.
+        If a background task is running, cancels the asyncio task,
+        updates the wiki current-run state to CANCELLED, and clears
+        the internal task references. Returns success with the
+        cancelled run_id.
+
+        If no task is running, returns an error response.
         """
+        if self._current_task is None or self._current_task.done():
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary="No test is currently running",
+                validation_errors=[],
+            )
+
+        cancelled_run_id = self._current_run_id or ""
+
+        # Cancel the asyncio task
+        self._current_task.cancel()
+
+        # Update wiki current-run state to CANCELLED
+        try:
+            wiki_run = current_run_io.read(self._config.wiki_root)
+            if wiki_run is not None and wiki_run.is_active:
+                cancelled_run = wiki_run.with_cancelled()
+                current_run_io.write(self._config.wiki_root, cancelled_run)
+                logger.info(
+                    "Updated wiki state to CANCELLED for run_id=%s",
+                    cancelled_run_id,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Failed to update wiki state to CANCELLED: %s", exc,
+            )
+
+        # Clear internal references
+        self._current_task = None
+        self._current_run_id = None
+
+        logger.info("Cancelled run run_id=%s", cancelled_run_id)
+
         return _build_success_response(
             msg_id=msg_id,
             verb="cancel",
             extra={
-                "status": "acknowledged",
+                "status": "cancelled",
+                "run_id": cancelled_run_id,
             },
         )
 
@@ -981,14 +1192,105 @@ class RequestHandler:
     ) -> MessageEnvelope:
         """Handle a history query.
 
-        In the full implementation, this reads from wiki run history.
-        For now, returns a stub.
+        Scans the wiki history directory for completed run files,
+        parses YAML frontmatter from each, and returns run summaries
+        sorted by created_at descending (newest first).
+
+        Supports optional filters in the parsed payload:
+        - limit: Maximum records to return (default 20).
+        - status_filter: Only return runs matching this status string.
+        - host_filter: Only return runs matching this host string.
         """
+        limit = int(parsed.get("limit", 20))
+        status_filter: str | None = parsed.get("status_filter")
+        host_filter: str | None = parsed.get("host_filter")
+
+        history_dir = self._config.wiki_root / "pages" / "daemon" / "history"
+        if not history_dir.exists():
+            return _build_success_response(
+                msg_id=msg_id,
+                verb="history",
+                extra={"records": [], "total": 0},
+            )
+
+        records: list[dict[str, Any]] = []
+        for md_file in sorted(history_dir.glob("run-*.md")):
+            try:
+                raw = md_file.read_text(encoding="utf-8")
+                from jules_daemon.wiki.frontmatter import parse as parse_fm
+
+                doc = parse_fm(raw)
+                fm = doc.frontmatter
+
+                run_id = fm.get("run_id", "")
+                status = fm.get("status", "")
+                created_at = fm.get("created") or fm.get("completed_at") or ""
+                host = ""
+                ssh_target = fm.get("ssh_target")
+                if isinstance(ssh_target, dict):
+                    host = ssh_target.get("host", "")
+
+                command_text = ""
+                command_data = fm.get("command")
+                if isinstance(command_data, dict):
+                    command_text = command_data.get("resolved_shell", "")
+
+                exit_code = None
+                error = fm.get("error")
+                if status == "completed":
+                    exit_code = 0
+                elif status == "failed" and isinstance(error, str):
+                    # Try to extract exit code from error message
+                    import re
+                    code_match = re.search(r"code\s+(\d+)", error)
+                    if code_match:
+                        exit_code = int(code_match.group(1))
+
+                duration: float | None = None
+                started_at_str = fm.get("started_at")
+                completed_at_str = fm.get("completed_at")
+                if started_at_str and completed_at_str:
+                    try:
+                        started_dt = datetime.fromisoformat(str(started_at_str))
+                        completed_dt = datetime.fromisoformat(str(completed_at_str))
+                        duration = round(
+                            (completed_dt - started_dt).total_seconds(), 2,
+                        )
+                    except (ValueError, TypeError):
+                        pass
+
+                # Apply filters
+                if status_filter and status != status_filter:
+                    continue
+                if host_filter and host != host_filter:
+                    continue
+
+                records.append({
+                    "run_id": run_id,
+                    "host": host,
+                    "command": command_text,
+                    "status": status,
+                    "exit_code": exit_code,
+                    "duration": duration,
+                    "created_at": str(created_at) if created_at else None,
+                })
+            except (ValueError, KeyError) as exc:
+                logger.warning(
+                    "Skipping malformed history file %s: %s", md_file, exc,
+                )
+                continue
+
+        # Sort by created_at descending (newest first)
+        records.sort(
+            key=lambda r: r.get("created_at") or "",
+            reverse=True,
+        )
+
+        total = len(records)
+        records = records[:limit]
+
         return _build_success_response(
             msg_id=msg_id,
             verb="history",
-            extra={
-                "records": [],
-                "total": 0,
-            },
+            extra={"records": records, "total": total},
         )

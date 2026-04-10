@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -136,13 +137,14 @@ def _execute_via_paramiko(
     credential: SSHCredential | None,
     command: str,
     timeout: int,
+    on_output: Callable[[str], None] | None = None,
 ) -> _ParamikoResult:
     """Execute a command on a remote host via paramiko (blocking).
 
     This function runs in a thread pool via asyncio.to_thread.
     It establishes an SSH connection, executes the command, reads
-    all output, and returns the result. The connection is always
-    closed on exit.
+    output line-by-line (streaming each line to the optional callback),
+    and returns the result. The connection is always closed on exit.
 
     Args:
         host: Remote hostname or IP address.
@@ -152,6 +154,8 @@ def _execute_via_paramiko(
             key-based auth.
         command: Shell command string to execute.
         timeout: Maximum execution time in seconds.
+        on_output: Optional callback invoked with each line of stdout
+            as it is received. Used for streaming output to watchers.
 
     Returns:
         _ParamikoResult with exit code, stdout, and stderr.
@@ -220,8 +224,17 @@ def _execute_via_paramiko(
             timeout=timeout,
         )
 
-        # Read all output
-        stdout_text = stdout_channel.read().decode("utf-8", errors="replace")
+        # Read output line by line for streaming, or all at once
+        if on_output is not None:
+            stdout_lines: list[str] = []
+            for raw_line in iter(stdout_channel.readline, ""):
+                decoded = raw_line if isinstance(raw_line, str) else raw_line.decode("utf-8", errors="replace")
+                stdout_lines.append(decoded)
+                on_output(decoded)
+            stdout_text = "".join(stdout_lines)
+        else:
+            stdout_text = stdout_channel.read().decode("utf-8", errors="replace")
+
         stderr_text = stderr_channel.read().decode("utf-8", errors="replace")
         exit_code = stdout_channel.channel.recv_exit_status()
 
@@ -338,6 +351,7 @@ async def execute_run(
     target_port: int = 22,
     wiki_root: Path,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    on_output: Callable[[str], None] | None = None,
 ) -> RunResult:
     """Execute a command on a remote host via SSH.
 
@@ -421,6 +435,7 @@ async def execute_run(
             credential=credential,
             command=command,
             timeout=timeout,
+            on_output=on_output,
         )
     except (SSHAuthenticationError, SSHConnectionError) as exc:
         end_time = _now_utc()
