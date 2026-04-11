@@ -19,10 +19,15 @@ import os
 import signal
 import sys
 from pathlib import Path
+from typing import Any
 
 from jules_daemon.ipc.request_handler import RequestHandler, RequestHandlerConfig
 from jules_daemon.ipc.server import ServerConfig, SocketServer
 from jules_daemon.ipc.socket_discovery import default_socket_path
+from jules_daemon.startup.crash_recovery_wire import (
+    RecoveredRunInfo,
+    try_crash_recovery,
+)
 from jules_daemon.startup.lifecycle import StartupHookConfig, run_startup
 from jules_daemon.wiki.current_run import exists as current_run_exists
 from jules_daemon.wiki.current_run import read as read_current_run
@@ -195,9 +200,9 @@ async def _run_daemon(
     """Run the daemon lifecycle.
 
     1. Initialize wiki directory structure
-    2. Check for crash recovery
+    2. Attempt crash recovery for any interrupted run
     3. Run startup lifecycle (scan-probe-mark pipeline)
-    4. Start IPC server
+    4. Start IPC server (seeded with any recovery info)
     5. Wait for shutdown signal
 
     Args:
@@ -213,10 +218,46 @@ async def _run_daemon(
     logger.info("Initializing wiki at %s", wiki_dir)
     initialize_wiki(wiki_dir)
 
-    # Step 2: Check for crash recovery
-    needs_recovery = _check_crash_recovery(wiki_dir)
-    if needs_recovery:
-        logger.info("Crash recovery will be handled by startup pipeline")
+    # Step 2: Attempt crash recovery for any interrupted run.
+    #
+    # This runs BEFORE the scan-probe-mark pipeline and BEFORE the IPC
+    # server comes up. It reads wiki/pages/daemon/current-run.md and
+    # reconciles any active run (RUNNING, PENDING_APPROVAL) that was
+    # left behind when the previous daemon process died. The recovered
+    # outcome is later passed to the RequestHandler so the next CLI
+    # handshake + status query can report it.
+    #
+    # Recovery is best-effort and never raises: any failure inside this
+    # block is logged and the daemon continues starting.
+    recovered: RecoveredRunInfo | None = None
+    try:
+        recovered = await try_crash_recovery(wiki_dir)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "Crash recovery wiring raised unexpectedly: %s",
+            exc,
+            exc_info=True,
+        )
+        recovered = None
+
+    if recovered is not None:
+        logger.warning(
+            "Recovered interrupted run: %s, final status: %s",
+            recovered.run_id,
+            recovered.status_label,
+        )
+    else:
+        # Legacy detection log -- preserved for operators who filter
+        # on the old message. This does NOT perform any recovery, it
+        # only prints a warning when the wiki still contains an active
+        # record after try_crash_recovery() returned None (which should
+        # be rare and only happen under unexpected wiki states).
+        if _check_crash_recovery(wiki_dir):
+            logger.info(
+                "Crash recovery wire returned no result but a non-idle "
+                "current-run was detected; the scan-probe-mark pipeline "
+                "will attempt additional cleanup."
+            )
 
     # Step 3: Run startup lifecycle
     startup_config = StartupHookConfig(
@@ -248,6 +289,13 @@ async def _run_daemon(
         llm_config=llm_config,
     )
     handler = RequestHandler(config=handler_config)
+
+    # Seed the handler with any crash recovery result so the next CLI
+    # client sees the recovery banner on handshake and the recovered
+    # run on the next `status` query.
+    if recovered is not None:
+        handler._last_completed_run = recovered.result
+        handler._last_failure = recovered.notification
 
     server_config = ServerConfig(socket_path=socket_path)
     server = SocketServer(config=server_config, handler=handler)
