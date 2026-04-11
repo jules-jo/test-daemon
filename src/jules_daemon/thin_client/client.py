@@ -443,6 +443,11 @@ class ThinClient:
                 error=result.error,
             )
 
+        # Print any pending failure notification from a prior background
+        # run or crash recovery (delivered via the handshake response)
+        if result.pending_failure:
+            print(result.pending_failure, flush=True)
+
         try:
             await conn.send(request)
             response = await conn.receive(
