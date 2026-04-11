@@ -361,9 +361,10 @@ class TestBuildWikiContext:
         handler = RequestHandler(config=config)
 
         context = handler._build_wiki_context(target_host="staging.example.com")
-        assert len(context) == 1
-        assert "run the smoke tests" in context[0]
-        assert "pytest tests/smoke/ -v" in context[0]
+        assert len(context) >= 1
+        joined = "\n".join(context)
+        assert "run the smoke tests" in joined
+        assert "pytest tests/smoke/ -v" in joined
 
     def test_filters_by_host(self, tmp_path: Path) -> None:
         from jules_daemon.wiki.command_translation import (
@@ -400,8 +401,10 @@ class TestBuildWikiContext:
         handler = RequestHandler(config=config)
 
         context = handler._build_wiki_context(target_host="staging.example.com")
-        assert len(context) == 1
-        assert "staging.example.com" not in context[0] or "run smoke" in context[0]
+        assert len(context) >= 1
+        joined = "\n".join(context)
+        assert "run smoke" in joined
+        assert "run tests" not in joined  # other host's translation is filtered out
 
 
 # ---------------------------------------------------------------------------

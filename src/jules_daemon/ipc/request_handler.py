@@ -649,6 +649,17 @@ class RequestHandler:
         translation store; returns an empty list if the wiki is empty
         or an error occurs.
 
+        Filters and ordering:
+          - DENIED entries are skipped (the user rejected those, so they
+            shouldn't influence future proposals).
+          - EDITED entries are listed FIRST -- they represent the user's
+            corrections of LLM proposals and should be treated as ground
+            truth. The prompt explicitly tells the LLM to mirror their
+            format.
+          - Within each group, entries are sorted by created_at descending
+            (newest first) so the LLM weights the most recent corrections.
+          - Up to 8 entries total (5 edited + 3 approved as headroom).
+
         Args:
             target_host: The SSH host to look up history for.
 
@@ -657,31 +668,54 @@ class RequestHandler:
         """
         context_lines: list[str] = []
         try:
-            from jules_daemon.wiki.command_translation import find_by_query
-
-            past = find_by_query(
-                self._config.wiki_root,
-                "",  # empty query returns nothing, so use host filter
-                ssh_host=target_host,
-                max_results=5,
+            from jules_daemon.wiki.command_translation import (
+                TranslationOutcome,
+                list_all,
             )
-            # find_by_query with empty string returns [] -- so also try
-            # listing recent translations for this host
-            if not past:
-                from jules_daemon.wiki.command_translation import list_all
 
-                all_translations = list_all(self._config.wiki_root)
-                past = [
-                    t for t in all_translations
-                    if t.ssh_host == target_host
-                ][:5]
+            all_translations = list_all(self._config.wiki_root)
+            host_translations = [
+                t for t in all_translations
+                if t.ssh_host == target_host
+            ]
 
-            for t in past:
+            # Sort newest first
+            host_translations.sort(
+                key=lambda t: t.created_at,
+                reverse=True,
+            )
+
+            # Partition by outcome (skip DENIED)
+            edited = [
+                t for t in host_translations
+                if t.outcome == TranslationOutcome.EDITED
+            ][:5]
+            approved = [
+                t for t in host_translations
+                if t.outcome == TranslationOutcome.APPROVED
+            ][:3]
+
+            if edited:
                 context_lines.append(
-                    f"Previous command on this host: "
-                    f"'{t.natural_language}' -> `{t.resolved_shell}` "
-                    f"(outcome: {t.outcome.value})"
+                    "### USER-CORRECTED COMMANDS (treat as ground truth)"
                 )
+                context_lines.append(
+                    "These are corrections the user made to previous LLM proposals. "
+                    "Mirror this exact format -- including quoting, flags, and "
+                    "argument style -- when generating new commands."
+                )
+                for t in edited:
+                    context_lines.append(
+                        f"- '{t.natural_language}' -> `{t.resolved_shell}`"
+                    )
+
+            if approved:
+                context_lines.append("")
+                context_lines.append("### Previously approved commands (for reference)")
+                for t in approved:
+                    context_lines.append(
+                        f"- '{t.natural_language}' -> `{t.resolved_shell}`"
+                    )
         except Exception as exc:
             logger.debug(
                 "Failed to read wiki translation history for %s: %s",
