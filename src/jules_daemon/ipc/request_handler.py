@@ -1556,6 +1556,13 @@ class RequestHandler:
         # Store the last completed run so `status` can report it even
         # after promote_run() clears the wiki current-run state.
         self._last_completed_run = result
+        logger.info(
+            "_background_execute: stored _last_completed_run "
+            "(run_id=%s, success=%s, exit_code=%s)",
+            result.run_id,
+            result.success,
+            result.exit_code,
+        )
 
         # Signal end-of-stream to any watch subscribers
         try:
@@ -2036,6 +2043,15 @@ class RequestHandler:
         task_running = (
             self._current_task is not None
             and not self._current_task.done()
+        )
+
+        logger.debug(
+            "_handle_status: task_running=%s, _current_task=%s, "
+            "_last_completed_run=%s, queue_depth=%d",
+            task_running,
+            "set" if self._current_task else "None",
+            "set" if self._last_completed_run else "None",
+            queue_depth,
         )
 
         # If no task is running but we have a recently completed run,
