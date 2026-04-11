@@ -1898,6 +1898,9 @@ class RequestHandler:
             remaining_after,
         )
 
+        # Clear the previous completed run -- a new run is starting
+        self._last_completed_run = None
+
         run_id = f"run-{uuid.uuid4().hex[:12]}"
         self._current_run_id = run_id
 
@@ -2039,6 +2042,35 @@ class RequestHandler:
         """
         queue_depth = self._queue.size()
 
+        # If we have a stored "last completed run", report it FIRST.
+        # This takes priority even if the task technically hasn't returned
+        # yet -- the task may still be writing audit files or extracting
+        # knowledge after execute_run() returned. From the user's perspective
+        # the run is done; only the bookkeeping is still in flight.
+        if self._last_completed_run is not None:
+            last = self._last_completed_run
+            final_status = "COMPLETED" if last.success else "FAILED"
+            duration = last.duration_seconds
+            extra: dict[str, Any] = {
+                "state": "completed",
+                "run_id": last.run_id,
+                "host": last.target_host,
+                "command": last.command,
+                "status": final_status,
+                "exit_code": last.exit_code,
+                "duration_seconds": round(duration, 2),
+                "queue_depth": queue_depth,
+            }
+            if last.error:
+                extra["error"] = last.error
+            if last.stderr:
+                extra["stderr"] = last.stderr[:2000]
+            return _build_success_response(
+                msg_id=msg_id,
+                verb="status",
+                extra=extra,
+            )
+
         # Check the background task state
         task_running = (
             self._current_task is not None
@@ -2054,10 +2086,8 @@ class RequestHandler:
             queue_depth,
         )
 
-        # If no task is running but we have a recently completed run,
-        # report its final result. This takes priority over the wiki
-        # current-run state because promote_run() clears the wiki after
-        # each run completes.
+        # Legacy branch -- kept for safety but should never be reached
+        # because the priority block above already handled it.
         if not task_running and self._last_completed_run is not None:
             last = self._last_completed_run
             final_status = "COMPLETED" if last.success else "FAILED"
