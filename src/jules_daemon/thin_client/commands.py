@@ -27,6 +27,7 @@ from jules_daemon.ipc.framing import MessageEnvelope, MessageType
 __all__ = [
     "build_cancel_request",
     "build_confirm_reply",
+    "build_discover_request",
     "build_health_request",
     "build_history_request",
     "build_run_request",
@@ -296,6 +297,45 @@ def build_watch_request(
     }
     if run_id is not None:
         payload["run_id"] = run_id
+
+    return MessageEnvelope(
+        msg_type=MessageType.REQUEST,
+        msg_id=_generate_msg_id(),
+        timestamp=_now_iso(),
+        payload=payload,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Discover
+# ---------------------------------------------------------------------------
+
+
+def build_discover_request(
+    *,
+    target: SSHTargetParams,
+    command: str,
+) -> MessageEnvelope:
+    """Build a discover REQUEST envelope.
+
+    Args:
+        target: SSH target connection parameters.
+        command: The command to discover (will be run with -h).
+
+    Returns:
+        MessageEnvelope for a discover command.
+
+    Raises:
+        ValueError: If command is empty.
+    """
+    if not command or not command.strip():
+        raise ValueError("command must not be empty")
+
+    payload: dict[str, object] = {
+        "verb": "discover",
+        "command": command,
+        **target.to_payload_dict(),
+    }
 
     return MessageEnvelope(
         msg_type=MessageType.REQUEST,

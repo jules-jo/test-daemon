@@ -49,6 +49,7 @@ __all__ = [
 
 _VALID_VERBS: frozenset[str] = frozenset({
     "status", "watch", "run", "queue", "cancel", "history", "handshake",
+    "discover",
 })
 
 # Valid output formats for the watch verb
@@ -638,6 +639,34 @@ def _validate_status_fields(
     return parsed
 
 
+def _validate_discover_fields(
+    payload: dict[str, Any],
+    errors: list[ValidationError],
+) -> dict[str, Any]:
+    """Validate discover verb required and optional fields.
+
+    Returns:
+        Parsed payload dict with validated fields.
+    """
+    parsed: dict[str, Any] = {}
+
+    host = _require_non_empty_string(payload, "target_host", errors)
+    if host is not None:
+        parsed["target_host"] = host
+
+    user = _require_non_empty_string(payload, "target_user", errors)
+    if user is not None:
+        parsed["target_user"] = user
+
+    command = _require_non_empty_string(payload, "command", errors)
+    if command is not None:
+        parsed["command"] = command
+
+    parsed["target_port"] = _validate_port(payload, "target_port", errors)
+
+    return parsed
+
+
 # Type alias for verb-specific field validators
 _VerbValidator = Callable[[dict[str, Any], list[ValidationError]], dict[str, Any]]
 
@@ -649,6 +678,7 @@ _VERB_VALIDATORS: dict[str, _VerbValidator] = {
     "watch": _validate_watch_fields,
     "history": _validate_history_fields,
     "status": _validate_status_fields,
+    "discover": _validate_discover_fields,
 }
 
 

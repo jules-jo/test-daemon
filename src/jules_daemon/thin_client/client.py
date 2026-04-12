@@ -66,6 +66,7 @@ from jules_daemon.thin_client.commands import (
     SSHTargetParams,
     build_cancel_request,
     build_confirm_reply,
+    build_discover_request,
     build_health_request,
     build_history_request,
     build_run_request,
@@ -357,6 +358,50 @@ class ThinClient:
             )
 
         return await self._execute_with_confirmation("run", envelope)
+
+    async def discover(
+        self,
+        *,
+        target_host: str,
+        target_user: str,
+        command: str,
+        target_port: int = 22,
+    ) -> CommandResult:
+        """Discover a test spec by running command -h on the remote host.
+
+        Sends a discover request and handles the confirmation flow:
+        the daemon sends back a draft spec as a CONFIRM_PROMPT, the
+        user approves or denies, and the daemon writes the wiki file.
+
+        Args:
+            target_host: Remote hostname or IP.
+            target_user: SSH username.
+            command: The command to discover (without -h flag).
+            target_port: SSH port. Default 22.
+
+        Returns:
+            CommandResult with the discovery outcome.
+        """
+        try:
+            target = SSHTargetParams(
+                host=target_host,
+                user=target_user,
+                port=target_port,
+            )
+            envelope = build_discover_request(
+                target=target,
+                command=command,
+            )
+        except ValueError as exc:
+            return CommandResult(
+                success=False,
+                verb="discover",
+                response=None,
+                rendered=f"Invalid parameters: {exc}",
+                error=str(exc),
+            )
+
+        return await self._execute_with_confirmation("discover", envelope)
 
     async def watch(
         self,

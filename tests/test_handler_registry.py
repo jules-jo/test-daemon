@@ -22,6 +22,7 @@ import pytest
 
 from jules_daemon.cli.verbs import (
     CancelArgs,
+    DiscoverArgs,
     HistoryArgs,
     ParsedCommand,
     QueueArgs,
@@ -71,6 +72,11 @@ async def fake_cancel_handler(args: VerbArgs) -> dict[str, Any]:
 async def fake_history_handler(args: VerbArgs) -> dict[str, Any]:
     """Return a mock history response."""
     return {"records": []}
+
+
+async def fake_discover_handler(args: VerbArgs) -> dict[str, Any]:
+    """Return a mock discover response."""
+    return {"discovered": True}
 
 
 async def replacement_status_handler(args: VerbArgs) -> dict[str, Any]:
@@ -357,7 +363,7 @@ class TestRegistryIntrospection:
 
     @pytest.fixture
     def full_registry(self) -> CommandHandlerRegistry:
-        """Registry with all six verbs registered."""
+        """Registry with all seven verbs registered."""
         return (
             CommandHandlerRegistry()
             .register(
@@ -396,6 +402,12 @@ class TestRegistryIntrospection:
                 description="View past test run results",
                 parameter_schema=HistoryArgs,
             )
+            .register(
+                verb=Verb.DISCOVER,
+                handler=fake_discover_handler,
+                description="Auto-discover test spec via SSH",
+                parameter_schema=DiscoverArgs,
+            )
         )
 
     def test_all_entries(
@@ -403,7 +415,7 @@ class TestRegistryIntrospection:
     ) -> None:
         entries = full_registry.all_entries()
         assert isinstance(entries, tuple)
-        assert len(entries) == 6
+        assert len(entries) == 7
         verbs_found = {e.verb for e in entries}
         assert verbs_found == frozenset(Verb)
 
@@ -424,7 +436,7 @@ class TestRegistryIntrospection:
     ) -> None:
         descriptions = full_registry.verb_descriptions()
         assert isinstance(descriptions, dict)
-        assert len(descriptions) == 6
+        assert len(descriptions) == 7
         assert descriptions["status"] == "Query the current run state"
         assert descriptions["run"] == "Start test execution via SSH"
         assert descriptions["cancel"] == "Cancel the current or queued run"
@@ -451,7 +463,7 @@ class TestRegistryIntrospection:
         assert verbs == frozenset(Verb)
 
     def test_len(self, full_registry: CommandHandlerRegistry) -> None:
-        assert len(full_registry) == 6
+        assert len(full_registry) == 7
 
 
 # ---------------------------------------------------------------------------
@@ -600,7 +612,7 @@ class TestCreateRegistry:
         assert registry.registered_verbs == frozenset()
         assert len(registry) == 0
 
-    def test_create_all_six(self) -> None:
+    def test_create_all_seven(self) -> None:
         registry = create_registry([
             {
                 "verb": Verb.STATUS,
@@ -638,9 +650,15 @@ class TestCreateRegistry:
                 "description": "View history",
                 "parameter_schema": HistoryArgs,
             },
+            {
+                "verb": Verb.DISCOVER,
+                "handler": fake_discover_handler,
+                "description": "Discover test spec",
+                "parameter_schema": DiscoverArgs,
+            },
         ])
         assert registry.registered_verbs == frozenset(Verb)
-        assert len(registry) == 6
+        assert len(registry) == 7
 
 
 # ---------------------------------------------------------------------------

@@ -30,6 +30,7 @@ from jules_daemon.wiki.models import SSHTarget
 
 __all__ = [
     "CancelArgs",
+    "DiscoverArgs",
     "HistoryArgs",
     "ParsedCommand",
     "QueueArgs",
@@ -48,18 +49,19 @@ __all__ = [
 
 
 class Verb(Enum):
-    """The six CLI verbs supported by the daemon.
+    """The seven CLI verbs supported by the daemon.
 
     Each verb maps to a specific daemon operation and has a
     corresponding ``*Args`` dataclass that defines its argument schema.
 
     Values:
-        STATUS:  Query the current run state.
-        WATCH:   Live-stream output from a running test session.
-        RUN:     Start a new test execution via natural-language command.
-        QUEUE:   Queue a command for execution when the daemon is busy.
-        CANCEL:  Cancel the current or a queued run.
-        HISTORY: Retrieve past test run results from the wiki.
+        STATUS:   Query the current run state.
+        WATCH:    Live-stream output from a running test session.
+        RUN:      Start a new test execution via natural-language command.
+        QUEUE:    Queue a command for execution when the daemon is busy.
+        CANCEL:   Cancel the current or a queued run.
+        HISTORY:  Retrieve past test run results from the wiki.
+        DISCOVER: Auto-discover a test spec by running command -h via SSH.
     """
 
     STATUS = "status"
@@ -68,6 +70,7 @@ class Verb(Enum):
     QUEUE = "queue"
     CANCEL = "cancel"
     HISTORY = "history"
+    DISCOVER = "discover"
 
 
 # Lookup table for case-insensitive parsing: lowered value -> Verb
@@ -388,6 +391,40 @@ class HistoryArgs:
 
 
 # ---------------------------------------------------------------------------
+# DiscoverArgs
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DiscoverArgs:
+    """Argument schema for the ``discover`` verb.
+
+    Attributes:
+        target_host: Remote hostname or IP address.
+        target_user: SSH username on the remote host.
+        command: The command to discover (run with -h).
+        target_port: SSH port on the remote host. Default is 22.
+    """
+
+    target_host: str
+    target_user: str
+    command: str
+    target_port: int = 22
+
+    def __post_init__(self) -> None:
+        if not self.target_host.strip():
+            raise ValueError("target_host must not be empty")
+        if not self.target_user.strip():
+            raise ValueError("target_user must not be empty")
+        if not self.command.strip():
+            raise ValueError("command must not be empty")
+        if not (1 <= self.target_port <= 65535):
+            raise ValueError(
+                f"target_port must be 1-65535, got {self.target_port}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Verb -> Args type mapping
 # ---------------------------------------------------------------------------
 
@@ -399,11 +436,13 @@ _VERB_ARGS_TYPE: dict[Verb, type] = {
     Verb.QUEUE: QueueArgs,
     Verb.CANCEL: CancelArgs,
     Verb.HISTORY: HistoryArgs,
+    Verb.DISCOVER: DiscoverArgs,
 }
 
 # Union type for all argument dataclasses
 VerbArgs = Union[
-    StatusArgs, WatchArgs, RunArgs, QueueArgs, CancelArgs, HistoryArgs
+    StatusArgs, WatchArgs, RunArgs, QueueArgs, CancelArgs, HistoryArgs,
+    DiscoverArgs,
 ]
 
 
@@ -421,7 +460,7 @@ class ParsedCommand:
     message that the CLI sends to the daemon.
 
     Attributes:
-        verb: The CLI verb (status, watch, run, queue, cancel, history).
+        verb: The CLI verb (status, watch, run, queue, cancel, history, discover).
         args: Validated argument dataclass matching the verb.
     """
 

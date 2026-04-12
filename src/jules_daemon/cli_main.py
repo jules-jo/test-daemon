@@ -35,7 +35,7 @@ _QUIT_COMMANDS = frozenset({"quit", "exit", "q", "c"})
 
 # Verb routing table: maps user-facing verb strings to thin client methods.
 _VERB_MAP = frozenset({
-    "status", "history", "cancel", "run", "watch", "health",
+    "status", "history", "cancel", "run", "watch", "health", "discover",
 })
 
 # Ordered tuple of verbs used for fuzzy typo correction. Kept as a
@@ -49,6 +49,7 @@ _KNOWN_VERBS: tuple[str, ...] = (
     "cancel",
     "queue",
     "health",
+    "discover",
 )
 
 # Minimum number of characters in the first token before we attempt
@@ -229,6 +230,39 @@ async def _execute_single(
             target_host=host,
             target_user=user,
             natural_language=natural_language,
+            target_port=port,
+        )
+
+    elif verb == "discover":
+        # discover user@host command [args...]
+        if not remaining:
+            print("Usage: jules discover user@host command [args...]")
+            return 1
+
+        target_spec = remaining[0]
+        command_parts = remaining[1:]
+
+        if "@" not in target_spec:
+            print("Error: target must be in user@host format")
+            return 1
+
+        user, host_part = target_spec.split("@", 1)
+        port = 22
+        if ":" in host_part:
+            host, port_str = host_part.rsplit(":", 1)
+            port = int(port_str)
+        else:
+            host = host_part
+
+        if not command_parts:
+            print("Error: command to discover is required")
+            return 1
+
+        command_str = " ".join(command_parts)
+        result = await client.discover(
+            target_host=host,
+            target_user=user,
+            command=command_str,
             target_port=port,
         )
 
@@ -461,6 +495,7 @@ def _print_help() -> None:
     print("  status [--verbose]            Query current run state")
     print("  watch [--run-id ID] [--tail N] Stream output from a run")
     print("  run user@host description     Start a test execution")
+    print("  discover user@host command    Auto-discover test spec via -h")
     print("  cancel [--force] [--run-id ID] Cancel a run")
     print("  history [--limit N] [--status S] View past results")
     print("  health                        Check daemon liveness")

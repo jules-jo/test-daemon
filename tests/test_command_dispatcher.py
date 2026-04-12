@@ -22,6 +22,7 @@ import pytest
 
 from jules_daemon.cli.verbs import (
     CancelArgs,
+    DiscoverArgs,
     HistoryArgs,
     ParsedCommand,
     QueueArgs,
@@ -78,6 +79,12 @@ async def fake_history_handler(args: VerbArgs) -> dict[str, Any]:
     """Return a mock history response."""
     history_args: HistoryArgs = args  # type: ignore[assignment]
     return {"records": [], "limit": history_args.limit}
+
+
+async def fake_discover_handler(args: VerbArgs) -> dict[str, Any]:
+    """Return a mock discover response."""
+    discover_args: DiscoverArgs = args  # type: ignore[assignment]
+    return {"discovered": True, "command": discover_args.command}
 
 
 async def exploding_handler(args: VerbArgs) -> dict[str, Any]:
@@ -391,7 +398,7 @@ class TestCreateDispatcher:
         assert result.success is True
         assert result.payload == {"cancelled": True, "force": False}
 
-    def test_create_all_six_verbs(self) -> None:
+    def test_create_all_seven_verbs(self) -> None:
         dispatcher = create_dispatcher({
             Verb.STATUS: fake_status_handler,
             Verb.WATCH: fake_watch_handler,
@@ -399,6 +406,7 @@ class TestCreateDispatcher:
             Verb.QUEUE: fake_queue_handler,
             Verb.CANCEL: fake_cancel_handler,
             Verb.HISTORY: fake_history_handler,
+            Verb.DISCOVER: fake_discover_handler,
         })
         assert dispatcher.registered_verbs == frozenset(Verb)
 

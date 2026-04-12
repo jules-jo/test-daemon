@@ -206,6 +206,11 @@ _VERB_DEFINITIONS: tuple[tuple[str, str, str], ...] = (
         "View past test run results. Use when the user asks about previous runs, results, or test history.",
         '{"limit": 20, "status_filter": null, "host_filter": null, "verbose": false}',
     ),
+    (
+        "discover",
+        "Auto-discover a test command's spec by running it with -h via SSH. Use when the user wants to discover, catalog, or learn about a test command.",
+        '{"target_host": "hostname", "target_user": "username", "command": "python3 test.py", "target_port": 22}',
+    ),
 )
 
 

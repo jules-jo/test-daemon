@@ -108,6 +108,12 @@ from jules_daemon.ipc.server import ClientConnection
 from jules_daemon.ssh.credentials import resolve_ssh_credentials
 from jules_daemon.wiki import current_run as current_run_io
 from jules_daemon.wiki.command_queue import CommandQueue
+from jules_daemon.execution.test_discovery import (
+    DiscoveredTestSpec,
+    discover_test,
+    format_spec_preview,
+    save_discovered_spec,
+)
 from jules_daemon.wiki.test_knowledge import (
     TestKnowledge,
     derive_test_slug,
@@ -473,6 +479,7 @@ class RequestHandler:
         self._async_client_dispatch: dict[str, _AsyncClientVerbHandler] = {
             "run": self._handle_run,
             "watch": self._handle_watch,
+            "discover": self._handle_discover,
         }
 
     # -- Agent loop availability -------------------------------------------------
@@ -862,6 +869,155 @@ class RequestHandler:
                 "queue_id": queued.queue_id,
                 "position": position,
                 "sequence": queued.sequence,
+            },
+        )
+
+    async def _handle_discover(
+        self,
+        msg_id: str,
+        parsed: dict[str, Any],
+        client: ClientConnection,
+    ) -> MessageEnvelope:
+        """Discover a test spec by running command -h on the remote host.
+
+        Flow:
+        1. SSH in and run ``command -h`` (falling back to ``--help``).
+        2. Send captured help text to the LLM for structured parsing.
+        3. Send a CONFIRM_PROMPT with the draft spec for user review.
+        4. If approved, write the wiki file and return the path.
+
+        Args:
+            msg_id: Correlation ID from the original request.
+            parsed: Validated payload with target_host, target_user,
+                command, and optional target_port.
+            client: Connection context for the confirmation exchange.
+
+        Returns:
+            RESPONSE envelope with the discovery result.
+        """
+        target_host = parsed.get("target_host", "")
+        target_user = parsed.get("target_user", "")
+        command = parsed.get("command", "")
+        target_port = parsed.get("target_port", 22)
+
+        logger.info(
+            "Discover request: %s@%s:%d %s (msg_id=%s)",
+            target_user,
+            target_host,
+            target_port,
+            command[:80],
+            msg_id,
+        )
+
+        # Step 1: Run -h via SSH and parse with LLM
+        try:
+            spec = await discover_test(
+                host=target_host,
+                user=target_user,
+                command=command,
+                port=target_port,
+                llm_client=self._config.llm_client,
+                llm_config=self._config.llm_config,
+            )
+        except Exception as exc:
+            logger.error("Discovery failed for msg_id=%s: %s", msg_id, exc)
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary=f"Discovery failed: {exc}",
+                validation_errors=[],
+            )
+
+        if spec is None:
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary=(
+                    f"Could not fetch help output for '{command}' "
+                    f"on {target_user}@{target_host}:{target_port}"
+                ),
+                validation_errors=[],
+            )
+
+        # Step 2: Show draft to user for approval
+        preview = format_spec_preview(spec)
+        confirm_msg_id = f"discover-confirm-{uuid.uuid4().hex[:12]}"
+        confirm_prompt = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_PROMPT,
+            msg_id=confirm_msg_id,
+            timestamp=_now_iso(),
+            payload={
+                "proposed_command": spec.command_template,
+                "target_host": target_host,
+                "message": f"{preview}\n\nSave to wiki?",
+            },
+        )
+
+        try:
+            await self._send_envelope(client, confirm_prompt)
+        except Exception:
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary="Failed to send discovery confirmation prompt",
+                validation_errors=[],
+            )
+
+        # Step 3: Wait for user approval
+        try:
+            reply = await self._read_envelope(client, timeout=120.0)
+        except (asyncio.TimeoutError, Exception):
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary="Discovery confirmation timed out",
+                validation_errors=[],
+            )
+
+        if reply is None:
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary="CLI disconnected during discovery confirmation",
+                validation_errors=[],
+            )
+
+        approved = reply.payload.get("approved", False)
+        if not approved:
+            logger.info("User declined to save discovered spec for msg_id=%s", msg_id)
+            return _build_success_response(
+                msg_id=msg_id,
+                verb="discover",
+                extra={
+                    "status": "declined",
+                    "message": "Discovery result not saved.",
+                    "preview": preview,
+                },
+            )
+
+        # Step 4: Write the wiki file
+        try:
+            wiki_path = await self._run_blocking(
+                save_discovered_spec,
+                self._config.wiki_root,
+                spec,
+                command,
+                target_host,
+            )
+        except Exception as exc:
+            logger.error("Failed to save discovered spec: %s", exc)
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary=f"Failed to write wiki file: {exc}",
+                validation_errors=[],
+            )
+
+        logger.info(
+            "Saved discovered spec to %s for msg_id=%s", wiki_path, msg_id,
+        )
+        return _build_success_response(
+            msg_id=msg_id,
+            verb="discover",
+            extra={
+                "status": "saved",
+                "wiki_path": str(wiki_path),
+                "preview": preview,
+                "message": f"Test spec saved to {wiki_path}",
             },
         )
 

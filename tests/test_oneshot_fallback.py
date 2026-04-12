@@ -913,12 +913,12 @@ class TestHandlerInitBackwardCompat:
         assert handler._command_translator is not None
 
     def test_verb_dispatch_table_intact(self, tmp_path: Path) -> None:
-        """All v1.2-mvp verbs are present in the dispatch table."""
+        """All verbs are present in the dispatch table."""
         config = RequestHandlerConfig(wiki_root=tmp_path)
         handler = RequestHandler(config=config)
 
         expected_sync = {"handshake", "queue", "status", "cancel", "history"}
-        expected_async = {"run", "watch"}
+        expected_async = {"run", "watch", "discover"}
 
         assert set(handler._verb_dispatch.keys()) == expected_sync
         assert set(handler._async_client_dispatch.keys()) == expected_async

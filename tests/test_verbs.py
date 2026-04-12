@@ -29,8 +29,8 @@ from jules_daemon.cli.verbs import (
 class TestVerb:
     """Tests for the Verb enum."""
 
-    def test_has_six_members(self) -> None:
-        assert len(Verb) == 6
+    def test_has_seven_members(self) -> None:
+        assert len(Verb) == 7
 
     def test_status_value(self) -> None:
         assert Verb.STATUS.value == "status"
