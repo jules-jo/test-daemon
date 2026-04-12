@@ -1531,7 +1531,10 @@ class RequestHandler:
             "and the user's provided + asked-for arguments.",
             "Step 4: Call propose_ssh_command with the built command. NEVER "
             "skip the approval step.",
-            "Step 5: After getting approval, call execute_ssh to run it.",
+            "Step 5: After getting approval (propose_ssh_command returns "
+            "approved=true with an approval_id), call execute_ssh "
+            "IMMEDIATELY in the next iteration with that approval_id. "
+            "Do NOT call propose_ssh_command again for the same command.",
             "Step 6: If the command fails, analyze the error and propose a "
             "corrected command. Do NOT repeat the same failing command.",
             "Step 7: When done, call summarize_run and stop calling tools.",

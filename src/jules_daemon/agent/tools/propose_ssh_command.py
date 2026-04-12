@@ -242,6 +242,11 @@ class ProposeSSHCommandTool(BaseTool):
                     "approval_id": approval_id,
                     "command": final_command,
                     "edited": final_command != command.strip(),
+                    "next_step": (
+                        "Command approved. Now call execute_ssh with "
+                        f"approval_id='{approval_id}' to run it. "
+                        "Do NOT call propose_ssh_command again."
+                    ),
                 }),
             )
         except Exception as exc:
