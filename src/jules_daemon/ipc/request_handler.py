@@ -909,6 +909,78 @@ class RequestHandler:
             msg_id,
         )
 
+        # Step 0: Check if a test spec already exists for this command
+        try:
+            from jules_daemon.wiki.test_knowledge import derive_test_slug
+            slug = derive_test_slug(command)
+            from jules_daemon.wiki.test_knowledge import KNOWLEDGE_DIR
+            existing_path = (
+                self._config.wiki_root / KNOWLEDGE_DIR / f"test-{slug}.md"
+            )
+            if existing_path.exists():
+                # Notify user and ask if they want to overwrite
+                exists_msg = MessageEnvelope(
+                    msg_type=MessageType.STREAM,
+                    msg_id=f"discover-exists-{uuid.uuid4().hex[:12]}",
+                    timestamp=_now_iso(),
+                    payload={
+                        "line": (
+                            f"\nA test spec already exists for this command:\n"
+                            f"  {existing_path}\n"
+                        ),
+                        "is_end": False,
+                    },
+                )
+                try:
+                    await self._send_envelope(client, exists_msg)
+                except Exception:
+                    pass
+
+                overwrite_prompt = MessageEnvelope(
+                    msg_type=MessageType.CONFIRM_PROMPT,
+                    msg_id=f"discover-overwrite-{uuid.uuid4().hex[:12]}",
+                    timestamp=_now_iso(),
+                    payload={
+                        "prompt_title": "Test Spec Already Exists",
+                        "message": "Re-discover and overwrite the existing spec?",
+                    },
+                )
+                try:
+                    await self._send_envelope(client, overwrite_prompt)
+                except Exception:
+                    return _build_error_response(
+                        msg_id=msg_id,
+                        error_summary="Failed to send overwrite prompt",
+                        validation_errors=[],
+                    )
+
+                try:
+                    overwrite_reply = await self._read_envelope(
+                        client, timeout=120.0,
+                    )
+                except (asyncio.TimeoutError, Exception):
+                    return _build_error_response(
+                        msg_id=msg_id,
+                        error_summary="Overwrite prompt timed out",
+                        validation_errors=[],
+                    )
+
+                if (
+                    overwrite_reply is None
+                    or not overwrite_reply.payload.get("approved", False)
+                ):
+                    return _build_success_response(
+                        msg_id=msg_id,
+                        verb="discover",
+                        extra={
+                            "status": "skipped",
+                            "message": "Using existing test spec.",
+                            "path": str(existing_path),
+                        },
+                    )
+        except Exception as exc:
+            logger.debug("Failed to check existing spec: %s", exc)
+
         # Step 1: Ask permission to run -h on the remote host
         help_command = f"{command} -h"
         pre_confirm_id = f"discover-pre-{uuid.uuid4().hex[:12]}"
