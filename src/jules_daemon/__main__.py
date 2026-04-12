@@ -21,6 +21,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Load .env file if python-dotenv is installed (optional dependency)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from jules_daemon.ipc.request_handler import RequestHandler, RequestHandlerConfig
 from jules_daemon.ipc.server import ServerConfig, SocketServer
 from jules_daemon.ipc.socket_discovery import default_socket_path
