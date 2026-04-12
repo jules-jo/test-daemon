@@ -997,17 +997,31 @@ class RequestHandler:
                 validation_errors=[],
             )
 
-        # Step 3: Show discovered spec to user for approval
+        # Step 3: Show discovered spec as a STREAM message, then ask to save
         preview = format_spec_preview(spec)
+        preview_msg = MessageEnvelope(
+            msg_type=MessageType.STREAM,
+            msg_id=f"discover-preview-{uuid.uuid4().hex[:12]}",
+            timestamp=_now_iso(),
+            payload={
+                "line": f"\n{preview}\n",
+                "is_end": False,
+            },
+        )
+        try:
+            await self._send_envelope(client, preview_msg)
+        except Exception:
+            pass
+
         confirm_msg_id = f"discover-confirm-{uuid.uuid4().hex[:12]}"
         confirm_prompt = MessageEnvelope(
             msg_type=MessageType.CONFIRM_PROMPT,
             msg_id=confirm_msg_id,
             timestamp=_now_iso(),
             payload={
-                "proposed_command": spec.command_template,
+                "proposed_command": "Save discovered test spec to wiki",
                 "target_host": target_host,
-                "message": f"{preview}\n\nSave to wiki?",
+                "message": "Save this test spec to wiki?",
             },
         )
 
