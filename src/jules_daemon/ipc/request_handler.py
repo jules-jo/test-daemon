@@ -1518,26 +1518,31 @@ class RequestHandler:
             f"- User: {target_user}",
             f"- Port: {target_port}",
             "",
-            "## Rules",
-            "1. ALWAYS use propose_ssh_command to propose a command before "
-            "executing it. NEVER skip the approval step.",
-            "2. After getting approval, use execute_ssh with the approval_id "
-            "to run the command.",
-            "3. If a command fails, analyze the error and propose a corrected "
-            "command. Do NOT repeat the same failing command.",
-            "4. If required arguments are missing from a test specification, "
-            "use ask_user_question to ask the user. NEVER guess or "
-            "auto-default missing required arguments.",
-            "5. Use read_wiki and lookup_test_spec to find information "
-            "about available tests and their configurations.",
-            "6. Use check_remote_processes before proposing a command if "
-            "you suspect other tests may be running.",
-            "7. When done, stop calling tools to signal completion.",
+            "## Mandatory Workflow",
             "",
-            "## Available Information",
-            "- Wiki pages contain test documentation and specifications.",
-            "- Test specs define command templates and required arguments.",
-            "- Past command history helps with command format.",
+            "For EVERY run request, follow these steps IN ORDER:",
+            "",
+            "Step 1: Call lookup_test_spec to check if the test has a wiki spec.",
+            "Step 2: If a spec exists, compare the user's request against the "
+            "spec's required_args. For EACH required arg that the user did NOT "
+            "provide, call ask_user_question to ask for it. Do NOT skip this "
+            "step. Do NOT guess or use defaults for required args.",
+            "Step 3: Build the SSH command using the spec's command_template "
+            "and the user's provided + asked-for arguments.",
+            "Step 4: Call propose_ssh_command with the built command. NEVER "
+            "skip the approval step.",
+            "Step 5: After getting approval, call execute_ssh to run it.",
+            "Step 6: If the command fails, analyze the error and propose a "
+            "corrected command. Do NOT repeat the same failing command.",
+            "Step 7: When done, call summarize_run and stop calling tools.",
+            "",
+            "## Additional Rules",
+            "- Use check_remote_processes before proposing if you suspect "
+            "other tests may be running.",
+            "- Use read_wiki for past command history on this host.",
+            "- If no test spec exists in the wiki, try to construct the "
+            "command from the user's description and wiki history.",
+            "- NEVER auto-default or guess required arguments. ALWAYS ask.",
         ]
 
         if wiki_block:
