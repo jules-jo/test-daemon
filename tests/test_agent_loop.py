@@ -83,7 +83,7 @@ class TestAgentLoopConfig:
 
     def test_default_values(self) -> None:
         config = AgentLoopConfig()
-        assert config.max_iterations == 5
+        assert config.max_iterations == 15
         assert config.max_retries == 2
 
     def test_custom_values(self) -> None:
@@ -422,7 +422,7 @@ class TestAgentLoopMaxIterations:
         )
         result = await loop.run("run tests")
 
-        assert result.iterations_used == 5
+        assert result.iterations_used == 15
         assert result.final_state is AgentLoopState.ERROR
 
 

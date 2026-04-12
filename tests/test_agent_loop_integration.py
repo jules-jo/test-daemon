@@ -376,7 +376,7 @@ class TestAgentLoopConfig:
 
     def test_default_max_iterations(self, tmp_path: Path) -> None:
         config = RequestHandlerConfig(wiki_root=tmp_path)
-        assert config.max_agent_iterations == 5
+        assert config.max_agent_iterations == 15
 
     def test_custom_max_iterations(self, tmp_path: Path) -> None:
         config = RequestHandlerConfig(

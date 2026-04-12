@@ -307,7 +307,7 @@ class RequestHandlerConfig:
     llm_client: OpenAI | None = None
     llm_config: LLMConfig | None = None
     one_shot: bool = False
-    max_agent_iterations: int = 5
+    max_agent_iterations: int = 15
     notification_broadcaster: NotificationBroadcaster | None = None
 
 

@@ -140,11 +140,11 @@ class TestDefaultCap:
     def test_agent_loop_config_default_is_five(self) -> None:
         """AgentLoopConfig() defaults to max_iterations=5."""
         config = AgentLoopConfig()
-        assert config.max_iterations == 5
+        assert config.max_iterations == 15
 
     def test_default_constant_matches(self) -> None:
         """DEFAULT_MAX_ITERATIONS constant matches AgentLoopConfig default."""
-        assert DEFAULT_MAX_ITERATIONS == 5
+        assert DEFAULT_MAX_ITERATIONS == 15
         assert DEFAULT_MAX_ITERATIONS == AgentLoopConfig().max_iterations
 
     @pytest.mark.asyncio
@@ -159,7 +159,7 @@ class TestDefaultCap:
         )
         result = await loop.run("run tests")
 
-        assert result.iterations_used == 5
+        assert result.iterations_used == 15
         assert result.final_state is AgentLoopState.ERROR
 
 
@@ -257,7 +257,7 @@ class TestErrorMessage:
         result = await loop.run("run tests")
 
         assert result.error_message is not None
-        assert "(5)" in result.error_message
+        assert "(15)" in result.error_message
 
 
 # ---------------------------------------------------------------------------

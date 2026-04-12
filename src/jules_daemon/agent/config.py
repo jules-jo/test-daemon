@@ -43,7 +43,7 @@ __all__ = [
 ]
 
 # Canonical defaults -- single source of truth
-DEFAULT_MAX_ITERATIONS: int = 5
+DEFAULT_MAX_ITERATIONS: int = 15
 DEFAULT_MAX_RETRIES: int = 2
 DEFAULT_RETRY_BASE_DELAY: float = 1.0
 

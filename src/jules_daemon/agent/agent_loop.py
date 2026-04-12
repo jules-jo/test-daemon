@@ -160,7 +160,7 @@ class AgentLoopConfig:
             to disable backoff (useful for tests).
     """
 
-    max_iterations: int = 5
+    max_iterations: int = 15
     max_retries: int = 2
     retry_base_delay: float = 1.0
 

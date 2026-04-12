@@ -455,7 +455,7 @@ class TestOneShotConfigDefaults:
     ) -> None:
         """max_agent_iterations defaults to 5."""
         config = RequestHandlerConfig(wiki_root=tmp_path)
-        assert config.max_agent_iterations == 5
+        assert config.max_agent_iterations == 15
 
     def test_config_frozen(self, tmp_path: Path) -> None:
         """Config is frozen (immutable)."""
