@@ -104,6 +104,18 @@ class ApprovalLedger:
                 return entry.approval_id
         return None
 
+    def find_approval(
+        self, *, command: str, target_host: str,
+    ) -> ApprovalEntry | None:
+        """Find an existing approval for a command+host pair.
+
+        Returns the ApprovalEntry if found, None otherwise.
+        """
+        for entry in self._entries.values():
+            if entry.command == command and entry.target_host == target_host:
+                return entry
+        return None
+
     def consume(self, approval_id: str) -> ApprovalEntry | None:
         """Remove and return an approval entry (one-time use)."""
         return self._entries.pop(approval_id, None)
@@ -205,6 +217,33 @@ class ProposeSSHCommandTool(BaseTool):
                 status=ToolResultStatus.ERROR,
                 output="",
                 error_message="target_user parameter is required",
+            )
+
+        # Check if this exact command was already approved in this session.
+        # If so, return the existing approval without re-prompting the user.
+        existing = self._ledger.find_approval(
+            command=command.strip(),
+            target_host=target_host.strip(),
+        )
+        if existing is not None:
+            logger.info(
+                "Command already approved (approval_id=%s), skipping re-prompt",
+                existing.approval_id,
+            )
+            return ToolResult(
+                call_id=call_id,
+                tool_name=self.name,
+                status=ToolResultStatus.SUCCESS,
+                output=json.dumps({
+                    "approved": True,
+                    "approval_id": existing.approval_id,
+                    "command": existing.command,
+                    "edited": False,
+                    "next_step": (
+                        "Command was already approved. Call execute_ssh with "
+                        f"approval_id='{existing.approval_id}' to run it."
+                    ),
+                }),
             )
 
         try:

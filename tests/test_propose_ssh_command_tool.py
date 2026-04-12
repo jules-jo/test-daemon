@@ -1048,9 +1048,9 @@ class TestProposeSSHCommandLedgerIntegration:
         tool = ProposeSSHCommandTool(
             confirm_callback=approve_callback, ledger=ledger,
         )
-        r1 = await tool.execute(_valid_args(call_id="c1"))
-        r2 = await tool.execute(_valid_args(call_id="c2"))
-        r3 = await tool.execute(_valid_args(call_id="c3"))
+        r1 = await tool.execute(_valid_args(command="pytest tests/unit", call_id="c1"))
+        r2 = await tool.execute(_valid_args(command="pytest tests/integration", call_id="c2"))
+        r3 = await tool.execute(_valid_args(command="pytest tests/e2e", call_id="c3"))
 
         id1 = json.loads(r1.output)["approval_id"]
         id2 = json.loads(r2.output)["approval_id"]
@@ -1067,8 +1067,8 @@ class TestProposeSSHCommandLedgerIntegration:
         tool = ProposeSSHCommandTool(
             confirm_callback=approve_callback, ledger=ledger,
         )
-        await tool.execute(_valid_args(call_id="c1"))
-        await tool.execute(_valid_args(call_id="c2"))
+        await tool.execute(_valid_args(command="pytest tests/unit", call_id="c1"))
+        await tool.execute(_valid_args(command="pytest tests/integration", call_id="c2"))
 
         assert ledger.pending_count == 2
 
@@ -1450,7 +1450,7 @@ class TestProposeSSHCommandCallbackInvocation:
     async def test_multiple_sequential_calls(
         self, ledger: ApprovalLedger,
     ) -> None:
-        """Multiple sequential calls each invoke the callback once."""
+        """Repeated calls with the same command+host deduplicate: callback invoked once."""
         call_count = 0
 
         async def counting_callback(
@@ -1468,8 +1468,8 @@ class TestProposeSSHCommandCallbackInvocation:
         await tool.execute(_valid_args(call_id="seq2"))
         await tool.execute(_valid_args(call_id="seq3"))
 
-        assert call_count == 3
-        assert ledger.pending_count == 3
+        assert call_count == 1
+        assert ledger.pending_count == 1
 
 
 # ---------------------------------------------------------------------------
