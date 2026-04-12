@@ -707,10 +707,9 @@ class TestDemo3FullPipeline:
         """Approval tracker received propose and execute requests."""
         _, pipeline = await _run_demo_3(tmp_path)
 
-        # 2 requests: 1 from propose_ssh_command, 1 from execute_ssh
-        assert len(pipeline.approval_tracker.requests) == 2
+        # 1 request: from propose_ssh_command only (execute_ssh no longer prompts)
+        assert len(pipeline.approval_tracker.requests) == 1
         assert pipeline.approval_tracker.requests[0][1] == _TEST_HOST
-        assert pipeline.approval_tracker.requests[1][1] == _TEST_HOST
 
     @pytest.mark.asyncio
     async def test_iterations_used(

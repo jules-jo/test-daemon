@@ -552,12 +552,11 @@ class TestAgentLoopE2EFullPipeline:
         assert r_summarize.tool_name == "summarize_run"
         assert r_summarize.status is ToolResultStatus.SUCCESS
 
-        # -- Verify approval tracker saw exactly 2 requests --
-        # (1 from propose_ssh_command, 1 from execute_ssh)
-        assert len(approval_tracker.requests) == 2
+        # -- Verify approval tracker saw exactly 1 request --
+        # (only from propose_ssh_command; execute_ssh no longer prompts)
+        assert len(approval_tracker.requests) == 1
         assert approval_tracker.requests[0][0] == _TEST_COMMAND
         assert approval_tracker.requests[0][1] == _TEST_HOST
-        assert approval_tracker.requests[1][1] == _TEST_HOST
 
         # -- Verify question tracker saw 1 question about iterations --
         assert len(question_tracker.questions) == 1

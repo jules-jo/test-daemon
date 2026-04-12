@@ -243,17 +243,19 @@ class TestExecuteSSHToolSpec:
 
 
 class TestHumanApprovalGate:
-    """Verify the integrated human-approval gate blocks until confirmation."""
+    """Verify the human-approval gate: approval via propose_ssh_command only."""
 
     @pytest.mark.asyncio
-    async def test_confirm_callback_called_before_execution(
+    async def test_confirm_callback_not_called_by_execute_ssh(
         self,
         wiki_root: Path,
         ledger: ApprovalLedger,
         sample_entry: ApprovalEntry,
         confirm_approve: AsyncMock,
     ) -> None:
-        """The confirm_callback must be called with the approved command."""
+        """execute_ssh no longer prompts the user -- approval was already
+        granted via propose_ssh_command. The confirm_callback must NOT be
+        called during execute_ssh."""
         ledger.record_approval(sample_entry)
         tool = _make_tool(wiki_root, ledger, confirm_approve)
 
@@ -267,123 +269,178 @@ class TestHumanApprovalGate:
             stdout="ok\n",
         )
 
-        await _execute_with_mock_pipeline(
+        result, _ = await _execute_with_mock_pipeline(
             tool,
             {"approval_id": sample_entry.approval_id, "_call_id": "c1"},
             mock_result,
         )
 
-        # Confirm callback must have been called with command and host
-        confirm_approve.assert_awaited_once()
-        call_args = confirm_approve.call_args
-        assert call_args[0][0] == sample_entry.command
-        assert call_args[0][1] == sample_entry.target_host
+        # execute_ssh no longer calls confirm_callback (single-gate: propose only)
+        confirm_approve.assert_not_awaited()
+        # Execution should still succeed
+        assert result.status is ToolResultStatus.SUCCESS
 
     @pytest.mark.asyncio
-    async def test_user_denial_returns_denied_status(
+    async def test_execution_proceeds_without_second_callback(
         self,
         wiki_root: Path,
         ledger: ApprovalLedger,
         sample_entry: ApprovalEntry,
-        confirm_deny: AsyncMock,
+        confirm_approve: AsyncMock,
     ) -> None:
-        """User denial must return DENIED status (terminal)."""
+        """execute_ssh goes straight to execution -- no second prompt needed."""
         ledger.record_approval(sample_entry)
-        tool = _make_tool(wiki_root, ledger, confirm_deny)
+        tool = _make_tool(wiki_root, ledger, confirm_approve)
 
-        result = await tool.execute({
-            "approval_id": sample_entry.approval_id,
-            "_call_id": "deny1",
-        })
+        mock_result = MockRunResult(
+            success=True,
+            run_id="run-noprompt",
+            command=sample_entry.command,
+            target_host=sample_entry.target_host,
+            target_user=sample_entry.target_user,
+            exit_code=0,
+            stdout="done\n",
+        )
 
-        assert result.status is ToolResultStatus.DENIED
-        assert result.is_terminal
-        assert "denied" in (result.error_message or "").lower()
+        result, _ = await _execute_with_mock_pipeline(
+            tool,
+            {"approval_id": sample_entry.approval_id, "_call_id": "deny1"},
+            mock_result,
+        )
+
+        assert result.status is ToolResultStatus.SUCCESS
+        # Callback not called -- approval already granted at propose stage
+        confirm_approve.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_denial_does_not_consume_approval(
+    async def test_approval_consumed_on_execution(
         self,
         wiki_root: Path,
         ledger: ApprovalLedger,
         sample_entry: ApprovalEntry,
-        confirm_deny: AsyncMock,
+        confirm_approve: AsyncMock,
     ) -> None:
-        """User denial must NOT consume the approval in the ledger.
-
-        This allows the agent to retry after denial if the user changes mind.
-        """
+        """Approval is consumed from the ledger when execute_ssh runs."""
         ledger.record_approval(sample_entry)
-        tool = _make_tool(wiki_root, ledger, confirm_deny)
+        tool = _make_tool(wiki_root, ledger, confirm_approve)
 
-        await tool.execute({
-            "approval_id": sample_entry.approval_id,
-            "_call_id": "deny2",
-        })
+        mock_result = MockRunResult(
+            success=True,
+            run_id="run-consume",
+            command=sample_entry.command,
+            target_host=sample_entry.target_host,
+            target_user=sample_entry.target_user,
+            exit_code=0,
+            stdout="ok\n",
+        )
 
-        # Approval should still be in the ledger
-        assert ledger.pending_count == 1
-        assert ledger.get_approved_command(sample_entry.approval_id) is not None
+        await _execute_with_mock_pipeline(
+            tool,
+            {"approval_id": sample_entry.approval_id, "_call_id": "deny2"},
+            mock_result,
+        )
+
+        # Approval is consumed on execution (one-time use)
+        assert ledger.pending_count == 0
+        assert ledger.get_approved_command(sample_entry.approval_id) is None
 
     @pytest.mark.asyncio
-    async def test_denial_output_includes_command_info(
+    async def test_successful_execution_output_includes_command_info(
         self,
         wiki_root: Path,
         ledger: ApprovalLedger,
         sample_entry: ApprovalEntry,
-        confirm_deny: AsyncMock,
+        confirm_approve: AsyncMock,
     ) -> None:
-        """Denied result should include the command and approval_id in output."""
+        """Successful result should include the command and run info in output."""
         ledger.record_approval(sample_entry)
-        tool = _make_tool(wiki_root, ledger, confirm_deny)
+        tool = _make_tool(wiki_root, ledger, confirm_approve)
 
-        result = await tool.execute({
-            "approval_id": sample_entry.approval_id,
-            "_call_id": "deny3",
-        })
+        mock_result = MockRunResult(
+            success=True,
+            run_id="run-info",
+            command=sample_entry.command,
+            target_host=sample_entry.target_host,
+            target_user=sample_entry.target_user,
+            exit_code=0,
+            stdout="output\n",
+        )
+
+        result, _ = await _execute_with_mock_pipeline(
+            tool,
+            {"approval_id": sample_entry.approval_id, "_call_id": "deny3"},
+            mock_result,
+        )
 
         data = json.loads(result.output)
-        assert data["approved"] is False
-        assert data["approval_id"] == sample_entry.approval_id
+        assert data["success"] is True
         assert data["command"] == sample_entry.command
+        assert data["exit_code"] == 0
 
     @pytest.mark.asyncio
-    async def test_confirm_callback_error_returns_error(
+    async def test_confirm_callback_stored_but_unused_by_execute(
         self,
         wiki_root: Path,
         ledger: ApprovalLedger,
         sample_entry: ApprovalEntry,
         confirm_error: AsyncMock,
     ) -> None:
-        """IPC failure during confirmation returns ERROR (not DENIED)."""
+        """Even when confirm_callback would raise an error, execute_ssh
+        ignores it and proceeds with execution (callback is no longer called)."""
         ledger.record_approval(sample_entry)
         tool = _make_tool(wiki_root, ledger, confirm_error)
 
-        result = await tool.execute({
-            "approval_id": sample_entry.approval_id,
-            "_call_id": "err1",
-        })
+        mock_result = MockRunResult(
+            success=True,
+            run_id="run-noerr",
+            command=sample_entry.command,
+            target_host=sample_entry.target_host,
+            target_user=sample_entry.target_user,
+            exit_code=0,
+            stdout="ok\n",
+        )
 
-        assert result.status is ToolResultStatus.ERROR
-        assert "confirmation failed" in (result.error_message or "").lower()
+        result, _ = await _execute_with_mock_pipeline(
+            tool,
+            {"approval_id": sample_entry.approval_id, "_call_id": "err1"},
+            mock_result,
+        )
+
+        # Callback not invoked; execution still succeeds
+        confirm_error.assert_not_awaited()
+        assert result.status is ToolResultStatus.SUCCESS
 
     @pytest.mark.asyncio
-    async def test_confirm_error_does_not_consume_approval(
+    async def test_approval_consumed_on_successful_execution_with_error_callback(
         self,
         wiki_root: Path,
         ledger: ApprovalLedger,
         sample_entry: ApprovalEntry,
         confirm_error: AsyncMock,
     ) -> None:
-        """IPC failure must NOT consume the approval from ledger."""
+        """Approval is consumed on execution regardless of what the callback
+        would have done (callback is not called by execute_ssh)."""
         ledger.record_approval(sample_entry)
         tool = _make_tool(wiki_root, ledger, confirm_error)
 
-        await tool.execute({
-            "approval_id": sample_entry.approval_id,
-            "_call_id": "err2",
-        })
+        mock_result = MockRunResult(
+            success=True,
+            run_id="run-consume2",
+            command=sample_entry.command,
+            target_host=sample_entry.target_host,
+            target_user=sample_entry.target_user,
+            exit_code=0,
+            stdout="ok\n",
+        )
 
-        assert ledger.pending_count == 1
+        await _execute_with_mock_pipeline(
+            tool,
+            {"approval_id": sample_entry.approval_id, "_call_id": "err2"},
+            mock_result,
+        )
+
+        # Approval consumed on execution
+        assert ledger.pending_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -815,30 +872,33 @@ class TestExecutionDelegation:
 
 
 class TestEditedCommandDuringConfirmation:
-    """Verify that user-edited commands from confirmation are used."""
+    """Verify that the approved command from the ledger is used for execution.
+
+    Command editing during confirmation is no longer supported at the
+    execute_ssh stage -- the command was approved as-is via propose_ssh_command.
+    """
 
     @pytest.mark.asyncio
-    async def test_edited_command_used_for_execution(
+    async def test_approved_command_used_for_execution(
         self,
         wiki_root: Path,
         ledger: ApprovalLedger,
         sample_entry: ApprovalEntry,
         confirm_edit: AsyncMock,
     ) -> None:
-        """When user edits command during confirmation, the edit is used."""
+        """execute_ssh uses the approved command from the ledger, not a
+        callback-edited version. The confirm_edit callback is not called."""
         ledger.record_approval(sample_entry)
         tool = _make_tool(wiki_root, ledger, confirm_edit)
-
-        expected_command = sample_entry.command + " --verbose"
 
         mock_result = MockRunResult(
             success=True,
             run_id="run-edit",
-            command=expected_command,
+            command=sample_entry.command,
             target_host=sample_entry.target_host,
             target_user=sample_entry.target_user,
             exit_code=0,
-            stdout="verbose output\n",
+            stdout="output\n",
         )
 
         _, mock_fn = await _execute_with_mock_pipeline(
@@ -847,9 +907,11 @@ class TestEditedCommandDuringConfirmation:
             mock_result,
         )
 
-        # Verify execute_run was called with the edited command
+        # Verify execute_run was called with the original (ledger) command
         call_kwargs = mock_fn.call_args[1]
-        assert call_kwargs["command"] == expected_command
+        assert call_kwargs["command"] == sample_entry.command
+        # Callback not called -- no editing happens at execute stage
+        confirm_edit.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -1009,8 +1071,8 @@ class TestProposeConfirmExecuteFlow:
         assert data["exit_code"] == 0
         assert "up 47 days" in data["stdout"]
 
-        # Verify confirmation was requested
-        confirm_approve.assert_awaited_once()
+        # execute_ssh no longer calls confirm_callback (single-gate at propose)
+        confirm_approve.assert_not_awaited()
 
         # Approval should now be consumed
         assert ledger.pending_count == 0
@@ -1022,7 +1084,14 @@ class TestProposeConfirmExecuteFlow:
 
 
 class TestRaceConditionGuard:
-    """Verify the race condition guard when approval is consumed between peek and consume."""
+    """Verify the race condition guard when approval is consumed between peek and consume.
+
+    Since execute_ssh no longer calls confirm_callback, the race window is the
+    gap between the initial ledger peek (get_approved_command) and the consume
+    call. We simulate this by patching the ledger's consume method to also
+    pre-consume the entry, or simply by consuming the entry from a separate
+    reference before the tool's consume call fires.
+    """
 
     @pytest.mark.asyncio
     async def test_concurrent_consume_returns_error(
@@ -1033,26 +1102,26 @@ class TestRaceConditionGuard:
     ) -> None:
         """If another call consumes the approval between peek and consume,
         the tool returns an ERROR (not a crash)."""
+        from unittest.mock import patch
+
         ledger = ApprovalLedger()
         ledger.record_approval(sample_entry)
         tool = _make_tool(wiki_root, ledger, confirm_approve)
 
-        # Simulate race: consume the approval during confirm_callback
-        original_confirm = confirm_approve.side_effect
+        # Simulate race: consume the approval before the tool's consume fires
+        original_consume = ledger.consume
 
-        async def _consume_during_confirm(
-            command: str, host: str, explanation: str
-        ) -> tuple[bool, str]:
-            # Simulate another call consuming the approval
-            ledger.consume(sample_entry.approval_id)
-            return True, command
+        def _consume_and_consume(approval_id: str):  # type: ignore[return]
+            # Consume once to clear it out (simulating another caller winning)
+            original_consume(approval_id)
+            # Then the tool's consume call gets None
+            return original_consume(approval_id)
 
-        confirm_approve.side_effect = _consume_during_confirm
-
-        result = await tool.execute({
-            "approval_id": sample_entry.approval_id,
-            "_call_id": "race1",
-        })
+        with patch.object(ledger, "consume", side_effect=_consume_and_consume):
+            result = await tool.execute({
+                "approval_id": sample_entry.approval_id,
+                "_call_id": "race1",
+            })
 
         assert result.status is ToolResultStatus.ERROR
         assert "consumed by another call" in (result.error_message or "")
@@ -1066,22 +1135,23 @@ class TestRaceConditionGuard:
         confirm_approve: AsyncMock,
     ) -> None:
         """Race condition error is retryable (not terminal like DENIED)."""
+        from unittest.mock import patch
+
         ledger = ApprovalLedger()
         ledger.record_approval(sample_entry)
         tool = _make_tool(wiki_root, ledger, confirm_approve)
 
-        async def _consume_during_confirm(
-            command: str, host: str, explanation: str
-        ) -> tuple[bool, str]:
-            ledger.consume(sample_entry.approval_id)
-            return True, command
+        original_consume = ledger.consume
 
-        confirm_approve.side_effect = _consume_during_confirm
+        def _consume_and_consume(approval_id: str):  # type: ignore[return]
+            original_consume(approval_id)
+            return original_consume(approval_id)
 
-        result = await tool.execute({
-            "approval_id": sample_entry.approval_id,
-            "_call_id": "race2",
-        })
+        with patch.object(ledger, "consume", side_effect=_consume_and_consume):
+            result = await tool.execute({
+                "approval_id": sample_entry.approval_id,
+                "_call_id": "race2",
+            })
 
         assert not result.is_terminal
         assert result.is_error

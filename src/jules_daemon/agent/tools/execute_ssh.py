@@ -184,47 +184,11 @@ class ExecuteSSHTool(BaseTool):
             entry.target_host,
         )
 
-        try:
-            explanation = (
-                f"Executing approved command (approval_id={entry.approval_id})"
-            )
-            approved, final_command = await self._confirm_callback(
-                entry.command,
-                entry.target_host,
-                explanation,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Execution confirmation failed for approval_id=%s: %s",
-                approval_id, exc,
-            )
-            return ToolResult(
-                call_id=call_id,
-                tool_name=self.name,
-                status=ToolResultStatus.ERROR,
-                output="",
-                error_message=f"Execution confirmation failed: {exc}",
-            )
+        # The command was already approved by propose_ssh_command.
+        # No second confirmation needed -- go straight to execution.
+        final_command = entry.command
 
-        # Step 4: If denied, return DENIED (terminal -- loop stops)
-        if not approved:
-            logger.info(
-                "User denied execution for approval_id=%s",
-                approval_id,
-            )
-            return ToolResult(
-                call_id=call_id,
-                tool_name=self.name,
-                status=ToolResultStatus.DENIED,
-                output=json.dumps({
-                    "approved": False,
-                    "approval_id": approval_id,
-                    "command": entry.command,
-                }),
-                error_message="User denied command execution",
-            )
-
-        # Step 5: Consume the approval (one-time use) now that user confirmed
+        # Step 4: Consume the approval (one-time use)
         consumed = self._ledger.consume(approval_id)
         if consumed is None:
             # Race condition guard: approval was consumed between peek and consume

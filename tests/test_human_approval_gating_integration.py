@@ -403,13 +403,13 @@ _PROPOSE_CALL = ToolCall(
 
 
 class TestApprovalGrantedFlowIntegration:
-    """End-to-end: propose -> approve -> execute -> approve -> complete."""
+    """End-to-end: propose -> approve -> execute -> complete."""
 
     @pytest.mark.asyncio
     async def test_approved_command_executes_and_completes(
         self, wiki_root: Path, stub_pipeline: Any
     ) -> None:
-        """When user approves both stages, the loop completes with SUCCESS tools."""
+        """When user approves the proposal, execute_ssh runs and loop completes."""
         tracker = ApprovalTracker(auto_approve=True)
         ledger = ApprovalLedger()
         registry = _build_registry(
@@ -443,16 +443,13 @@ class TestApprovalGrantedFlowIntegration:
         assert result.error_message is None
         assert result.retry_exhausted is False
 
-        # Both propose and execute triggered callbacks
-        assert len(tracker.requests) == 2, (
-            f"Expected 2 approval requests, got {len(tracker.requests)}"
+        # Only propose_ssh_command triggers the callback (single-gate)
+        assert len(tracker.requests) == 1, (
+            f"Expected 1 approval request (propose only), got {len(tracker.requests)}"
         )
-        # First request is the proposal
+        # The proposal callback was called with the correct command and host
         assert tracker.requests[0][0] == _COMMAND
         assert tracker.requests[0][1] == _HOST
-        # Second request is the execution confirmation
-        assert tracker.requests[1][0] == _COMMAND
-        assert tracker.requests[1][1] == _HOST
 
     @pytest.mark.asyncio
     async def test_approval_id_flows_from_propose_to_execute(
@@ -699,20 +696,27 @@ class TestProposalDenialTerminatesLoop:
 
 
 class TestExecutionDenialTerminatesLoop:
-    """User approves proposal but denies execution -> loop terminates."""
+    """execute_ssh no longer prompts the user. Denial only happens at propose.
+
+    These tests verify that the propose-approve-execute flow works correctly:
+    propose denial terminates the loop, and successful propose+execute completes.
+    """
 
     @pytest.mark.asyncio
     async def test_execution_denial_terminates_loop(
-        self, wiki_root: Path
+        self, wiki_root: Path, stub_pipeline: Any
     ) -> None:
-        """Approve proposal, deny execution -> ERROR state."""
-        # First call (propose) approves, second call (execute) denies
-        split_tracker = SplitApprovalTracker(approve_count=1)
+        """Approve proposal -> execute runs -> loop completes.
+
+        Execution denial is no longer possible (no second prompt). With a
+        valid approval, execute_ssh always runs the command.
+        """
+        tracker = ApprovalTracker(auto_approve=True)
         ledger = ApprovalLedger()
         registry = _build_registry(
             wiki_root=wiki_root,
             ledger=ledger,
-            propose_callback=split_tracker.confirm,
+            propose_callback=tracker.confirm,
         )
         bridge = ToolDispatchBridge(registry=registry)
 
@@ -730,26 +734,25 @@ class TestExecutionDenialTerminatesLoop:
         )
         result = await loop.run(_NL_INPUT)
 
-        # Loop terminates with ERROR because execute_ssh was DENIED
-        assert result.final_state is AgentLoopState.ERROR
-        assert result.iterations_used == 2
-        assert result.error_message is not None
-        assert "denied" in result.error_message.lower()
+        # Loop completes (propose approved, execute runs without second prompt)
+        assert result.final_state is AgentLoopState.COMPLETE
+        assert result.iterations_used == 3
+        assert result.error_message is None
 
-        # Both callbacks were called: one for propose, one for execute
-        assert len(split_tracker.requests) == 2
+        # Only one callback call (propose only)
+        assert len(tracker.requests) == 1
 
     @pytest.mark.asyncio
     async def test_execution_denial_preserves_ledger(
-        self, wiki_root: Path
+        self, wiki_root: Path, stub_pipeline: Any
     ) -> None:
-        """Denial at execute_ssh does NOT consume the approval from the ledger."""
-        split_tracker = SplitApprovalTracker(approve_count=1)
+        """After successful execute_ssh, the approval is consumed from the ledger."""
+        tracker = ApprovalTracker(auto_approve=True)
         ledger = ApprovalLedger()
         registry = _build_registry(
             wiki_root=wiki_root,
             ledger=ledger,
-            propose_callback=split_tracker.confirm,
+            propose_callback=tracker.confirm,
         )
         bridge = ToolDispatchBridge(registry=registry)
 
@@ -767,21 +770,21 @@ class TestExecutionDenialTerminatesLoop:
         )
         result = await loop.run(_NL_INPUT)
 
-        assert result.final_state is AgentLoopState.ERROR
-        # The approval was NOT consumed (denial does not consume)
-        assert ledger.pending_count == 1
+        assert result.final_state is AgentLoopState.COMPLETE
+        # The approval IS consumed on execution (one-time use)
+        assert ledger.pending_count == 0
 
     @pytest.mark.asyncio
     async def test_execution_denial_output_has_details(
-        self, wiki_root: Path
+        self, wiki_root: Path, stub_pipeline: Any
     ) -> None:
-        """Denied execution result contains denial info in history and dispatch."""
-        split_tracker = SplitApprovalTracker(approve_count=1)
+        """Successful execution result contains execution info in history."""
+        tracker = ApprovalTracker(auto_approve=True)
         ledger = ApprovalLedger()
         registry = _build_registry(
             wiki_root=wiki_root,
             ledger=ledger,
-            propose_callback=split_tracker.confirm,
+            propose_callback=tracker.confirm,
         )
         bridge = ToolDispatchBridge(registry=registry)
 
@@ -799,7 +802,7 @@ class TestExecutionDenialTerminatesLoop:
         )
         result = await loop.run(_NL_INPUT)
 
-        # The history has 2 tool messages: propose SUCCESS, execute DENIED
+        # The history has 2 tool messages: propose SUCCESS, execute SUCCESS
         tool_messages = [
             m for m in result.history if m.get("role") == "tool"
         ]
@@ -809,18 +812,14 @@ class TestExecutionDenialTerminatesLoop:
         propose_data = json.loads(tool_messages[0]["content"])
         assert propose_data["approved"] is True
 
-        # Execute message is formatted as "ERROR: ..." (DENIED status)
-        execute_content = tool_messages[1]["content"]
-        assert "denied" in execute_content.lower()
+        # Execute message is also JSON (SUCCESS status -> raw output)
+        execute_data = json.loads(tool_messages[1]["content"])
+        assert execute_data["success"] is True
 
-        # The raw ToolResult from the dispatch bridge has structured data
+        # The raw ToolResult from the dispatch bridge has SUCCESS status
         all_results = bridge.all_results
         execute_result = all_results[-1]
-        assert execute_result.status is ToolResultStatus.DENIED
-        exec_data = json.loads(execute_result.output)
-        assert exec_data["approved"] is False
-        assert "approval_id" in exec_data
-        assert exec_data["command"] == _COMMAND
+        assert execute_result.status is ToolResultStatus.SUCCESS
 
 
 # ---------------------------------------------------------------------------
@@ -874,16 +873,15 @@ class TestApprovalBlocksUntilCallback:
     async def test_execute_blocks_until_callback_completes(
         self, wiki_root: Path, stub_pipeline: Any
     ) -> None:
-        """execute_ssh awaits the confirm_callback before running the command."""
-        # Propose uses instant approval, execute uses delayed
-        instant = ApprovalTracker(auto_approve=True)
-        delayed_exec = DelayedApprovalTracker(delay_seconds=0.05)
+        """execute_ssh does not call a confirm_callback; it runs immediately
+        after checking the ledger. The execute_callback is not invoked."""
+        # Propose uses delayed approval; execute should NOT invoke any callback
+        delayed_propose = DelayedApprovalTracker(delay_seconds=0.05)
         ledger = ApprovalLedger()
         registry = _build_registry(
             wiki_root=wiki_root,
             ledger=ledger,
-            propose_callback=instant.confirm,
-            execute_callback=delayed_exec.confirm,
+            propose_callback=delayed_propose.confirm,
         )
         bridge = ToolDispatchBridge(registry=registry)
 
@@ -902,11 +900,11 @@ class TestApprovalBlocksUntilCallback:
         result = await loop.run(_NL_INPUT)
 
         assert result.final_state is AgentLoopState.COMPLETE
-        # Delayed callback was called exactly once (for execute)
-        assert len(delayed_exec.requests) == 1
+        # Propose callback was called once (with delay)
+        assert len(delayed_propose.requests) == 1
         elapsed = (
-            delayed_exec.post_delay_times[0]
-            - delayed_exec.pre_delay_times[0]
+            delayed_propose.post_delay_times[0]
+            - delayed_propose.pre_delay_times[0]
         )
         assert elapsed >= 0.04
 
@@ -1066,15 +1064,20 @@ class TestApprovalGrantedThenDeniedAtExecution:
 
     @pytest.mark.asyncio
     async def test_two_level_gate_deny_at_execution(
-        self, wiki_root: Path
+        self, wiki_root: Path, stub_pipeline: Any
     ) -> None:
-        """Proposal approved -> execution denied -> ERROR."""
-        split = SplitApprovalTracker(approve_count=1)
+        """Single-gate: proposal approved -> execute_ssh runs -> loop completes.
+
+        The two-level gate (propose + execute prompts) no longer exists.
+        execute_ssh does not prompt the user. With a valid approval the
+        command runs immediately, and the loop completes successfully.
+        """
+        tracker = ApprovalTracker(auto_approve=True)
         ledger = ApprovalLedger()
         registry = _build_registry(
             wiki_root=wiki_root,
             ledger=ledger,
-            propose_callback=split.confirm,
+            propose_callback=tracker.confirm,
         )
         bridge = ToolDispatchBridge(registry=registry)
 
@@ -1092,12 +1095,12 @@ class TestApprovalGrantedThenDeniedAtExecution:
         )
         result = await loop.run(_NL_INPUT)
 
-        assert result.final_state is AgentLoopState.ERROR
-        assert result.iterations_used == 2
-        # Proposal succeeded (first call), execution denied (second call)
-        assert len(split.requests) == 2
+        assert result.final_state is AgentLoopState.COMPLETE
+        assert result.iterations_used == 3
+        # Only one approval callback (propose only -- single gate)
+        assert len(tracker.requests) == 1
 
-        # Verify the history contains: propose SUCCESS then execute DENIED
+        # Verify the history contains: propose SUCCESS then execute SUCCESS
         tool_results_in_history = [
             m for m in result.history if m.get("role") == "tool"
         ]
@@ -1107,15 +1110,16 @@ class TestApprovalGrantedThenDeniedAtExecution:
         propose_data = json.loads(tool_results_in_history[0]["content"])
         assert propose_data.get("approved") is True
 
-        # Execute result is "ERROR: ..." text (DENIED -> error_message)
-        execute_content = tool_results_in_history[1]["content"]
-        assert "denied" in execute_content.lower()
+        # Execute result is also JSON (SUCCESS -> raw output)
+        execute_data = json.loads(tool_results_in_history[1]["content"])
+        assert execute_data.get("success") is True
+        assert execute_data.get("exit_code") == 0
 
         # Verify via dispatch bridge raw results
         exec_result = bridge.all_results[-1]
-        assert exec_result.status is ToolResultStatus.DENIED
+        assert exec_result.status is ToolResultStatus.SUCCESS
         exec_data = json.loads(exec_result.output)
-        assert exec_data.get("approved") is False
+        assert exec_data.get("success") is True
 
 
 # ---------------------------------------------------------------------------

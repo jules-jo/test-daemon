@@ -711,11 +711,10 @@ class TestHappyPathFullCycle:
         assert summary_data["passed"] == 50
         assert summary_data["failed"] == 0
 
-        # -- Approval tracker: 2 requests (propose + execute) --
-        assert len(approval_tracker.requests) == 2
+        # -- Approval tracker: 1 request (propose only; execute no longer prompts) --
+        assert len(approval_tracker.requests) == 1
         assert approval_tracker.requests[0][0] == _TEST_COMMAND
         assert approval_tracker.requests[0][1] == _TEST_HOST
-        assert approval_tracker.requests[1][1] == _TEST_HOST
 
         # -- Question tracker: 1 question about iterations --
         assert len(question_tracker.questions) == 1
