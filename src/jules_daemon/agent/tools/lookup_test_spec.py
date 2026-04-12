@@ -206,15 +206,65 @@ class LookupTestSpecTool(InfoRetrievalTool):
     def _lookup(self, test_name: str) -> dict[str, Any]:
         """Blocking wiki lookup -- runs in thread pool.
 
-        Delegates to existing wiki.test_knowledge module.
+        Tries multiple slug strategies to find the test spec:
+        1. Direct slug from derive_test_slug (handles command-style input)
+        2. Simple slugify of the test name (handles "ld test" -> "ld-test")
+        3. Glob search for partial matches in the knowledge directory
         """
+        import re
         from jules_daemon.wiki.test_knowledge import (
+            KNOWLEDGE_DIR,
             derive_test_slug,
             load_test_knowledge,
         )
 
+        # Strategy 1: derive_test_slug (best for command-style input)
         slug = derive_test_slug(test_name)
         knowledge = load_test_knowledge(self._wiki_root, slug)
+
+        # Strategy 2: simple slugify (best for test names like "ld test")
+        if knowledge is None:
+            simple_slug = re.sub(r"[^a-z0-9]+", "-", test_name.lower()).strip("-")
+            if simple_slug and simple_slug != slug:
+                knowledge = load_test_knowledge(self._wiki_root, simple_slug)
+                if knowledge is not None:
+                    slug = simple_slug
+
+        # Strategy 3: scan all spec files and match against frontmatter
+        # fields: name, test_slug, command_template
+        if knowledge is None:
+            knowledge_dir = self._wiki_root / KNOWLEDGE_DIR
+            if knowledge_dir.is_dir():
+                search_lower = test_name.lower().replace("_", " ").replace("-", " ")
+                search_words = {w for w in search_lower.split() if len(w) >= 2}
+
+                for md_file in sorted(knowledge_dir.glob("test-*.md")):
+                    try:
+                        from jules_daemon.wiki import frontmatter
+                        raw = md_file.read_text(encoding="utf-8")
+                        doc = frontmatter.parse(raw)
+                        fm = doc.frontmatter
+
+                        # Check name, test_slug, and command_template
+                        fm_name = str(fm.get("name", "")).lower().replace("_", " ").replace("-", " ")
+                        fm_slug = str(fm.get("test_slug", "")).lower().replace("_", " ").replace("-", " ")
+                        fm_cmd = str(fm.get("command_template", "")).lower()
+
+                        # Match if any search word appears in name/slug/command
+                        matched = any(
+                            word in fm_name or word in fm_slug or word in fm_cmd
+                            for word in search_words
+                        )
+                        if matched:
+                            match_slug = md_file.stem.removeprefix("test-")
+                            knowledge = load_test_knowledge(
+                                self._wiki_root, match_slug,
+                            )
+                            if knowledge is not None:
+                                slug = match_slug
+                                break
+                    except Exception:
+                        continue
 
         if knowledge is None:
             return {

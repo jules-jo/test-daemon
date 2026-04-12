@@ -434,9 +434,18 @@ def save_discovered_spec(
     # Ensure parent directory exists
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Extract a human-readable name from the command
+    # e.g. "python3.8 /root/tests/ld_test.py" -> "ld_test"
+    import os as _os
+    name_parts = command.strip().split()
+    raw_name = name_parts[-1] if name_parts else slug
+    # Strip path and extension
+    raw_name = _os.path.splitext(_os.path.basename(raw_name))[0]
+
     fm: dict[str, Any] = {
         "tags": list(_WIKI_TAGS),
         "type": _WIKI_TYPE,
+        "name": raw_name,
         "test_slug": slug,
         "command_template": spec.command_template,
         "required_args": list(spec.required_args),
