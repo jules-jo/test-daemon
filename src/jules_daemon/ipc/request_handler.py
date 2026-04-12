@@ -1243,7 +1243,18 @@ class RequestHandler:
                         msg_id,
                         exc,
                     )
-                # Fall through to one-shot path
+
+                # Only fall back to one-shot for retry-exhausted errors.
+                # For other errors, return an error response to avoid
+                # double-prompting the user (the agent loop may have
+                # already shown a CONFIRM_PROMPT before failing).
+                if not is_retry_exhausted:
+                    return _build_error_response(
+                        msg_id=msg_id,
+                        error_summary=f"Agent loop error: {exc}",
+                        validation_errors=[],
+                    )
+                # Fall through to one-shot path for retry exhaustion only
 
         # Fallback: one-shot LLM translation (v1.2-mvp behavior)
         return await self._handle_run_oneshot(msg_id, parsed, client)

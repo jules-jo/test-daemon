@@ -241,7 +241,7 @@ class TestFallbackOnAgentLoopFailure:
     async def test_agent_loop_import_error_falls_back(
         self, tmp_path: Path,
     ) -> None:
-        """ImportError in agent loop init triggers one-shot fallback."""
+        """ImportError in agent loop returns an ERROR response."""
         config = RequestHandlerConfig(
             wiki_root=tmp_path,
             llm_client=_make_llm_client(),
@@ -249,7 +249,6 @@ class TestFallbackOnAgentLoopFailure:
         )
         handler = RequestHandler(config=config)
         client = _make_client()
-        _setup_deny_reply(client)
 
         with patch.object(
             handler,
@@ -266,15 +265,15 @@ class TestFallbackOnAgentLoopFailure:
 
             response = await handler.handle_message(envelope, client)
 
-            # Fell back to one-shot, user denied
-            assert response.msg_type == MessageType.RESPONSE
-            assert response.payload["status"] == "denied"
+            # Non-RetryExhaustedError returns an ERROR response
+            assert response.msg_type == MessageType.ERROR
+            assert "Agent loop error" in response.payload["error"]
 
     @pytest.mark.asyncio
     async def test_agent_loop_runtime_error_falls_back(
         self, tmp_path: Path,
     ) -> None:
-        """RuntimeError in agent loop triggers one-shot fallback."""
+        """RuntimeError in agent loop returns an ERROR response."""
         config = RequestHandlerConfig(
             wiki_root=tmp_path,
             llm_client=_make_llm_client(),
@@ -282,7 +281,6 @@ class TestFallbackOnAgentLoopFailure:
         )
         handler = RequestHandler(config=config)
         client = _make_client()
-        _setup_deny_reply(client)
 
         with patch.object(
             handler,
@@ -299,17 +297,18 @@ class TestFallbackOnAgentLoopFailure:
 
             response = await handler.handle_message(envelope, client)
 
-            assert response.msg_type == MessageType.RESPONSE
-            assert response.payload["status"] == "denied"
+            assert response.msg_type == MessageType.ERROR
+            assert "Agent loop error" in response.payload["error"]
 
     @pytest.mark.asyncio
     async def test_agent_loop_any_exception_falls_back(
         self, tmp_path: Path,
     ) -> None:
-        """Any exception from agent loop triggers one-shot fallback.
+        """Any non-RetryExhaustedError exception from agent loop returns ERROR.
 
-        The _handle_run method catches Exception from _handle_run_agent_loop
-        and falls through to _handle_run_oneshot. This is the safety net.
+        The _handle_run method catches non-RetryExhaustedError exceptions from
+        _handle_run_agent_loop and returns an ERROR response instead of falling
+        through to one-shot. Only RetryExhaustedError triggers the fallback.
         """
         config = RequestHandlerConfig(
             wiki_root=tmp_path,
@@ -318,7 +317,6 @@ class TestFallbackOnAgentLoopFailure:
         )
         handler = RequestHandler(config=config)
         client = _make_client()
-        _setup_deny_reply(client)
 
         with patch.object(
             handler,
@@ -335,10 +333,8 @@ class TestFallbackOnAgentLoopFailure:
 
             response = await handler.handle_message(envelope, client)
 
-            assert response.msg_type == MessageType.RESPONSE
-            assert response.payload["verb"] == "run"
-            # One-shot path runs, user denies
-            assert response.payload["status"] == "denied"
+            assert response.msg_type == MessageType.ERROR
+            assert "Agent loop error" in response.payload["error"]
 
 
 # ---------------------------------------------------------------------------

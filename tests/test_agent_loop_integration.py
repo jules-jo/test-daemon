@@ -276,7 +276,7 @@ class TestNLCommandAgentLoopRouting:
     async def test_nl_command_falls_back_on_agent_failure(
         self, tmp_path: Path,
     ) -> None:
-        """NL command falls back to one-shot when agent loop fails."""
+        """NL command returns ERROR when agent loop raises a non-retry error."""
         config = RequestHandlerConfig(
             wiki_root=tmp_path,
             llm_client=_make_llm_client(),
@@ -284,7 +284,6 @@ class TestNLCommandAgentLoopRouting:
         )
         handler = RequestHandler(config=config)
         client = _make_client()
-        _setup_deny_reply(client)
 
         with patch.object(
             handler,
@@ -301,11 +300,9 @@ class TestNLCommandAgentLoopRouting:
 
             response = await handler.handle_message(envelope, client)
 
-            # Should have fallen back to one-shot path
-            # (deny reply was set up, so result is denied)
-            assert response.msg_type == MessageType.RESPONSE
-            assert response.payload["verb"] == "run"
-            assert response.payload["status"] == "denied"
+            # Non-RetryExhaustedError returns an ERROR response
+            assert response.msg_type == MessageType.ERROR
+            assert "Agent loop error" in response.payload["error"]
 
 
 # ---------------------------------------------------------------------------

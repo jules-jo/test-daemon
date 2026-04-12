@@ -402,13 +402,12 @@ class TestNLCommandsUseAgentLoop:
         )
         handler = RequestHandler(config=config)
         client = _make_client()
-        _setup_deny_reply(client)
 
         with patch.object(
             handler,
             "_handle_run_agent_loop",
             new_callable=AsyncMock,
-            # Simulate agent loop failure to fall through
+            # Simulate agent loop failure (non-RetryExhaustedError)
             side_effect=RuntimeError("Agent loop test error"),
         ) as mock_agent:
             envelope = _make_request(payload={
@@ -422,8 +421,9 @@ class TestNLCommandsUseAgentLoop:
 
             # Agent loop WAS called (even though it failed)
             mock_agent.assert_called_once()
-            # Fell back to one-shot path, user denied
-            assert response.payload["status"] == "denied"
+            # Non-RetryExhaustedError returns ERROR, not one-shot fallback
+            assert response.msg_type == MessageType.ERROR
+            assert "Agent loop error" in response.payload["error"]
 
     @pytest.mark.asyncio
     async def test_daemon_verb_not_detected_as_direct(

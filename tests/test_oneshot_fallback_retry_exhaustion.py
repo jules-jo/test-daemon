@@ -595,8 +595,11 @@ class TestRetryExhaustionTriggersOneShot:
     async def test_permanent_error_not_retry_exhaustion(
         self, tmp_path: Path,
     ) -> None:
-        """Permanent errors from agent loop also trigger fallback but not via
-        RetryExhaustedError. They are caught as generic Exception.
+        """Permanent errors from agent loop return an ERROR response.
+
+        Unlike RetryExhaustedError (which triggers one-shot fallback),
+        permanent errors are returned as ERROR envelopes to avoid
+        double-prompting the user.
         """
         from jules_daemon.ipc.request_handler import (
             RequestHandler,
@@ -611,7 +614,6 @@ class TestRetryExhaustionTriggersOneShot:
         )
         handler = RequestHandler(config=config)
         client = _make_client()
-        _setup_deny_reply(client)
 
         with patch.object(
             handler,
@@ -628,9 +630,9 @@ class TestRetryExhaustionTriggersOneShot:
 
             response = await handler.handle_message(envelope, client)
 
-            # Still falls back to one-shot (generic exception catch)
-            assert response.msg_type == MessageType.RESPONSE
-            assert response.payload["status"] == "denied"
+            # Permanent errors return ERROR, not a one-shot fallback
+            assert response.msg_type == MessageType.ERROR
+            assert "Agent loop error" in response.payload["error"]
 
 
 # ---------------------------------------------------------------------------
