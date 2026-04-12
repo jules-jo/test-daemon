@@ -909,7 +909,67 @@ class RequestHandler:
             msg_id,
         )
 
-        # Step 1: Run -h via SSH and parse with LLM
+        # Step 1: Ask permission to run -h on the remote host
+        help_command = f"{command} -h"
+        pre_confirm_id = f"discover-pre-{uuid.uuid4().hex[:12]}"
+        pre_confirm = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_PROMPT,
+            msg_id=pre_confirm_id,
+            timestamp=_now_iso(),
+            payload={
+                "proposed_command": help_command,
+                "target_host": target_host,
+                "target_user": target_user,
+                "message": (
+                    f"Will run '{help_command}' on "
+                    f"{target_user}@{target_host}:{target_port} "
+                    f"to discover test arguments."
+                ),
+            },
+        )
+        try:
+            await self._send_envelope(client, pre_confirm)
+        except Exception as exc:
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary="Failed to send discovery confirmation",
+                validation_errors=[],
+            )
+
+        try:
+            pre_reply = await self._read_envelope(client, timeout=120.0)
+        except (asyncio.TimeoutError, Exception):
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary="Discovery confirmation timed out",
+                validation_errors=[],
+            )
+
+        if pre_reply is None or not pre_reply.payload.get("approved", False):
+            return _build_success_response(
+                msg_id=msg_id,
+                verb="discover",
+                extra={"status": "denied", "message": "Discovery cancelled."},
+            )
+
+        # Step 2: SSH in, run -h, parse with LLM
+        status_msg = MessageEnvelope(
+            msg_type=MessageType.STREAM,
+            msg_id=f"discover-status-{uuid.uuid4().hex[:12]}",
+            timestamp=_now_iso(),
+            payload={
+                "line": (
+                    f"\nRunning '{help_command}' on "
+                    f"{target_user}@{target_host}...\n"
+                ),
+                "is_end": False,
+            },
+        )
+        try:
+            await self._send_envelope(client, status_msg)
+        except Exception:
+            pass
+
         try:
             spec = await discover_test(
                 host=target_host,
@@ -937,7 +997,7 @@ class RequestHandler:
                 validation_errors=[],
             )
 
-        # Step 2: Show draft to user for approval
+        # Step 3: Show discovered spec to user for approval
         preview = format_spec_preview(spec)
         confirm_msg_id = f"discover-confirm-{uuid.uuid4().hex[:12]}"
         confirm_prompt = MessageEnvelope(
