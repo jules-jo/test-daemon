@@ -217,6 +217,7 @@ def make_ask_callback(
             msg_id=ask_msg_id,
             timestamp=_now_iso(),
             payload={
+                "prompt_title": "Question",
                 "question": question,
                 "context": context,
                 "message": full_message,

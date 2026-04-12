@@ -73,25 +73,52 @@ _CLASSIFIER_CONFIDENCE_THRESHOLD: float = 0.7
 
 
 def _interactive_confirm(envelope: MessageEnvelope) -> tuple[bool, str | None]:
-    """Prompt the user to approve, deny, or edit an SSH command.
+    """Prompt the user to approve, deny, edit, or answer a question.
 
-    Displays the proposed command and asks for approve/deny/edit.
-    If the user picks edit, reads a new command line and returns it
-    along with approved=True.
+    Handles two types of CONFIRM_PROMPT:
+    1. SSH command approval: shows command, asks [A]pprove/[D]eny/[E]dit
+    2. Question: shows the question, reads a free-text answer
+
+    The prompt type is determined by the payload's 'type' field.
 
     Args:
         envelope: The CONFIRM_PROMPT envelope from the daemon.
 
     Returns:
-        (approved, edited_command) tuple. edited_command is None if
-        the original was accepted as-is, or the new text if edited.
+        (approved, answer_or_edit) tuple.
+        For SSH approvals: (True/False, edited_command or None)
+        For questions: (True, user's text answer) or (False, None) if cancelled
     """
+    payload = envelope.payload
+    prompt_type = payload.get("type", "")
+
+    # Handle question-type prompts (from ask_user_question tool)
+    if prompt_type == "question":
+        question = payload.get("question") or payload.get("message") or "?"
+        context = payload.get("context", "")
+        print()
+        if context:
+            print(f"  {context}")
+        print(f"  {question}")
+        print()
+        try:
+            answer = input("  Your answer (or 'skip' to cancel): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False, None
+        if not answer or answer.lower() == "skip":
+            return False, None
+        # Return the answer as the "edited_command" field -- the IPC
+        # bridge reads it from payload["answer"] or payload["text"]
+        return True, answer
+
+    # Standard SSH command approval
     prompt_text = render_confirm_prompt(envelope)
     print(prompt_text)
 
     original_command = (
-        envelope.payload.get("proposed_command")
-        or envelope.payload.get("command")
+        payload.get("proposed_command")
+        or payload.get("command")
         or ""
     )
 

@@ -379,6 +379,10 @@ def build_confirm_reply(
     }
     if edited_command is not None:
         payload["edited_command"] = edited_command
+        # Also set as "answer" and "text" so the ask_user_question IPC
+        # bridge can read the user's response from the same reply envelope
+        payload["answer"] = edited_command
+        payload["text"] = edited_command
 
     return MessageEnvelope(
         msg_type=MessageType.CONFIRM_REPLY,
