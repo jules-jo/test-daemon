@@ -162,7 +162,7 @@ class TestRenderConfirmPrompt:
         )
         result = render_confirm_prompt(envelope)
         assert "ls" in result
-        assert "<unknown>" in result  # default for missing target
+        assert "SSH Command Approval Required" in result
 
     def test_no_explanation(self):
         envelope = _make_envelope(

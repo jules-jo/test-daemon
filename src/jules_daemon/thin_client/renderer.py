@@ -87,22 +87,41 @@ def render_confirm_prompt(envelope: MessageEnvelope) -> str:
     """
     payload = envelope.payload
     command = payload.get("proposed_command") or payload.get("command") or "<no command>"
-    target_host = payload.get("target_host", "<unknown>")
-    target_user = payload.get("target_user", "<unknown>")
-    risk_level = payload.get("risk_level", "unknown")
+    target_host = payload.get("target_host", "")
+    target_user = payload.get("target_user", "")
+    risk_level = payload.get("risk_level", "")
     explanation = payload.get("explanation", "")
+    # Custom title and message for non-SSH prompts (e.g., discover save)
+    prompt_title = payload.get("prompt_title", "")
+    message = payload.get("message", "")
 
     separator = "-" * 50
+
+    # Use custom title if provided, otherwise default to SSH
+    if prompt_title:
+        title = prompt_title
+    else:
+        title = "SSH Command Approval Required"
 
     lines = [
         "",
         separator,
-        "  SSH Command Approval Required",
+        f"  {title}",
         separator,
-        f"  Target:      {target_user}@{target_host}",
-        f"  Command:     {command}",
-        f"  Risk:        {risk_level}",
     ]
+
+    # Only show target if it's an SSH prompt (has user and host)
+    if target_user and target_host and not prompt_title:
+        lines.append(f"  Target:      {target_user}@{target_host}")
+
+    # Show message if provided (used for non-SSH prompts), else show command
+    if message and prompt_title:
+        lines.append(f"  {message}")
+    else:
+        lines.append(f"  Command:     {command}")
+
+    if risk_level and not prompt_title:
+        lines.append(f"  Risk:        {risk_level}")
 
     if explanation:
         lines.append(f"  Explanation: {explanation}")

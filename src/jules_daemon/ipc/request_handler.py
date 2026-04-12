@@ -1019,9 +1019,8 @@ class RequestHandler:
             msg_id=confirm_msg_id,
             timestamp=_now_iso(),
             payload={
-                "proposed_command": "Save discovered test spec to wiki",
-                "target_host": target_host,
-                "message": "Save this test spec to wiki?",
+                "prompt_title": "Save Test Spec to Wiki",
+                "message": "Save this test spec to your local wiki?",
             },
         )
 
