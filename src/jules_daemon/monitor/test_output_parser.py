@@ -79,11 +79,15 @@ class FrameworkHint(Enum):
 
     AUTO: Let the parser auto-detect from output content.
     PYTEST: Python pytest framework.
+    JEST: JavaScript/TypeScript Jest framework.
+    GO_TEST: Go testing framework (go test).
     UNKNOWN: Could not detect the framework.
     """
 
     AUTO = "auto"
     PYTEST = "pytest"
+    JEST = "jest"
+    GO_TEST = "go_test"
     UNKNOWN = "unknown"
 
 
@@ -103,6 +107,8 @@ class TestRecord:
         duration_seconds: Execution duration if available.
         output_lines: Captured output lines associated with this test.
         line_number: 0-based line number in the output where this test appeared.
+        failure_message: Extracted failure/error message for failed tests.
+            None for passing or skipped tests.
     """
 
     name: str
@@ -111,6 +117,7 @@ class TestRecord:
     duration_seconds: Optional[float] = None
     output_lines: tuple[str, ...] = ()
     line_number: Optional[int] = None
+    failure_message: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -198,23 +205,51 @@ _PYTEST_SUMMARY_RE = re.compile(
 )
 
 
+_JEST_SUITE_RE = re.compile(r"^\s*(PASS|FAIL)\s+\S+\.test\.\w+")
+"""Matches Jest suite-level result lines like: PASS  src/utils/math.test.ts"""
+
+_JEST_SUMMARY_RE = re.compile(r"^Test Suites:\s+")
+"""Matches Jest summary: Test Suites: 1 failed, 1 passed, 2 total"""
+
+_GO_TEST_RUN_RE = re.compile(r"^=== RUN\s+\S+")
+"""Matches go test verbose run lines: === RUN   TestAdd"""
+
+_GO_TEST_RESULT_RE = re.compile(
+    r"^--- (PASS|FAIL|SKIP): (\S+) \((\d+\.\d+)s\)"
+)
+"""Matches go test result lines: --- PASS: TestAdd (0.00s)"""
+
+
 def _detect_framework(lines: tuple[str, ...]) -> FrameworkHint:
     """Detect the test framework from output content.
 
-    Checks for pytest-specific markers in the output lines.
+    Checks for framework-specific markers in the output lines.
+    Detection order: pytest, jest, go test, unknown.
 
     Args:
         lines: Stripped output lines.
 
     Returns:
-        FrameworkHint.PYTEST if pytest markers found, else UNKNOWN.
+        Detected FrameworkHint, or UNKNOWN if no markers found.
     """
     for line in lines:
         if _PYTEST_SESSION_START_RE.search(line):
             return FrameworkHint.PYTEST
-        # Also check for pytest-style test paths (module::test)
         if "::" in line and _is_pytest_result_line(line):
             return FrameworkHint.PYTEST
+
+    for line in lines:
+        if _JEST_SUITE_RE.match(line):
+            return FrameworkHint.JEST
+        if _JEST_SUMMARY_RE.match(line):
+            return FrameworkHint.JEST
+
+    for line in lines:
+        if _GO_TEST_RUN_RE.match(line):
+            return FrameworkHint.GO_TEST
+        if _GO_TEST_RESULT_RE.match(line):
+            return FrameworkHint.GO_TEST
+
     return FrameworkHint.UNKNOWN
 
 
@@ -382,6 +417,367 @@ def _parse_pytest_short_line(
 
 
 # ---------------------------------------------------------------------------
+# Pytest failure message extraction
+# ---------------------------------------------------------------------------
+
+_PYTEST_FAILURES_HEADER_RE = re.compile(r"^=+ FAILURES =+$")
+_PYTEST_FAILURE_NAME_RE = re.compile(r"^_+ (\S+) _+$")
+_PYTEST_SHORT_SUMMARY_RE = re.compile(r"^=+ short test summary info =+$")
+_PYTEST_ERRORS_HEADER_RE = re.compile(r"^=+ ERRORS =+$")
+
+
+def _extract_pytest_failure_messages(
+    lines: tuple[str, ...],
+) -> dict[str, str]:
+    """Extract per-test failure messages from the FAILURES section.
+
+    Scans for the ``=== FAILURES ===`` header, then parses each failure
+    block delimited by ``___ test_name ___`` underlines.
+
+    Args:
+        lines: Stripped, ANSI-free output lines.
+
+    Returns:
+        Dict mapping test names to their failure message text.
+    """
+    failures: dict[str, str] = {}
+    in_failures_section = False
+    current_test_name: str | None = None
+    current_lines: list[str] = []
+
+    for line in lines:
+        # Detect start of FAILURES section
+        if _PYTEST_FAILURES_HEADER_RE.match(line):
+            in_failures_section = True
+            continue
+
+        # Detect end of FAILURES section
+        if in_failures_section and (
+            _PYTEST_SHORT_SUMMARY_RE.match(line)
+            or _PYTEST_FINAL_SUMMARY_RE.match(line)
+            or _PYTEST_ERRORS_HEADER_RE.match(line)
+        ):
+            if current_test_name is not None and current_lines:
+                failures[current_test_name] = "\n".join(current_lines).strip()
+            break
+
+        if not in_failures_section:
+            continue
+
+        # Detect individual test failure block header
+        name_match = _PYTEST_FAILURE_NAME_RE.match(line)
+        if name_match is not None:
+            # Save previous block
+            if current_test_name is not None and current_lines:
+                failures[current_test_name] = "\n".join(current_lines).strip()
+            current_test_name = name_match.group(1)
+            current_lines = []
+            continue
+
+        if current_test_name is not None:
+            current_lines.append(line)
+
+    # Save final block if we ran off the end of input
+    if current_test_name is not None and current_lines:
+        failures[current_test_name] = "\n".join(current_lines).strip()
+
+    return failures
+
+
+# ---------------------------------------------------------------------------
+# Jest output parsing
+# ---------------------------------------------------------------------------
+
+# Matches Jest individual test results:
+#   check mark (pass): \u2713
+#   cross mark (fail): \u2717 or \u2715
+#   circle (skip/todo): \u25cb
+_JEST_PASS_RE = re.compile(r"^\s+\u2713\s+(.+?)(?:\s+\(\d+\s*m?s\))?\s*$")
+_JEST_FAIL_RE = re.compile(r"^\s+\u2717\s+(.+?)(?:\s+\(\d+\s*m?s\))?\s*$")
+_JEST_SKIP_RE = re.compile(r"^\s+\u25cb\s+(.+?)$")
+
+# Matches Jest failure detail header:
+#   bullet (fail detail): \u25cf Description > test name
+_JEST_FAILURE_DETAIL_RE = re.compile(r"^\s+\u25cf\s+(.+)$")
+
+_JEST_TEST_SUITES_RE = re.compile(
+    r"^Test Suites:\s+(.+)$"
+)
+
+
+def _parse_jest_output(
+    lines: tuple[str, ...],
+    raw_output: str,
+) -> ParseResult:
+    """Parse Jest-style output into structured records.
+
+    Extracts test results from:
+    1. Check/cross/circle markers for individual tests
+    2. Failure detail blocks for error messages
+
+    Args:
+        lines: Stripped, ANSI-free output lines.
+        raw_output: Original raw output for truncation detection.
+
+    Returns:
+        ParseResult with all extracted records.
+    """
+    records: list[TestRecord] = []
+    current_suite = ""
+
+    # First pass: extract test results
+    for line_number, line in enumerate(lines):
+        # Track current suite
+        suite_match = _JEST_SUITE_RE.match(line)
+        if suite_match is not None:
+            # Extract module path from "PASS  src/utils/math.test.ts"
+            parts = line.strip().split(None, 1)
+            current_suite = parts[1].strip() if len(parts) > 1 else ""
+            continue
+
+        pass_match = _JEST_PASS_RE.match(line)
+        if pass_match is not None:
+            records.append(TestRecord(
+                name=pass_match.group(1).strip(),
+                status=TestStatus.PASSED,
+                module=current_suite,
+                line_number=line_number,
+            ))
+            continue
+
+        fail_match = _JEST_FAIL_RE.match(line)
+        if fail_match is not None:
+            records.append(TestRecord(
+                name=fail_match.group(1).strip(),
+                status=TestStatus.FAILED,
+                module=current_suite,
+                line_number=line_number,
+            ))
+            continue
+
+        skip_match = _JEST_SKIP_RE.match(line)
+        if skip_match is not None:
+            records.append(TestRecord(
+                name=skip_match.group(1).strip(),
+                status=TestStatus.SKIPPED,
+                module=current_suite,
+                line_number=line_number,
+            ))
+            continue
+
+    # Second pass: extract failure messages
+    failure_messages = _extract_jest_failure_messages(lines)
+
+    # Attach failure messages to failed records
+    records_with_messages = _attach_jest_failure_messages(records, failure_messages)
+
+    has_summary = any(_JEST_SUMMARY_RE.match(line) for line in lines)
+    records_tuple = tuple(records_with_messages)
+    truncated = not has_summary and len(records_tuple) > 0
+
+    return ParseResult(
+        records=records_tuple,
+        truncated=truncated,
+        framework_hint=FrameworkHint.JEST,
+        total_lines_parsed=len(lines),
+        raw_tail=_extract_raw_tail(lines),
+    )
+
+
+def _extract_jest_failure_messages(
+    lines: tuple[str, ...],
+) -> dict[str, str]:
+    """Extract per-test failure messages from Jest failure detail blocks.
+
+    Jest failure blocks start with a bullet marker line:
+        ``  * Description > test name``
+    followed by the error message and stack trace, and end when the
+    next bullet or summary section starts.
+
+    Args:
+        lines: Stripped output lines.
+
+    Returns:
+        Dict mapping test names (last segment after >) to failure text.
+    """
+    failures: dict[str, str] = {}
+    current_test_name: str | None = None
+    current_lines: list[str] = []
+
+    for line in lines:
+        detail_match = _JEST_FAILURE_DETAIL_RE.match(line)
+        if detail_match is not None:
+            # Save previous block
+            if current_test_name is not None and current_lines:
+                failures[current_test_name] = "\n".join(current_lines).strip()
+            # Extract just the test name (last part after >)
+            full_path = detail_match.group(1).strip()
+            parts = full_path.split(">")
+            current_test_name = parts[-1].strip()
+            current_lines = []
+            continue
+
+        # Detect end of failure blocks
+        if current_test_name is not None:
+            if _JEST_TEST_SUITES_RE.match(line):
+                failures[current_test_name] = "\n".join(current_lines).strip()
+                current_test_name = None
+                current_lines = []
+                continue
+            current_lines.append(line)
+
+    # Save final block
+    if current_test_name is not None and current_lines:
+        failures[current_test_name] = "\n".join(current_lines).strip()
+
+    return failures
+
+
+def _attach_jest_failure_messages(
+    records: list[TestRecord],
+    failure_messages: dict[str, str],
+) -> list[TestRecord]:
+    """Attach failure messages to failed Jest test records.
+
+    Creates new TestRecord instances with failure_message set for tests
+    that have matching entries in the failure_messages dict.
+
+    Args:
+        records: Original test records.
+        failure_messages: Dict mapping test names to failure text.
+
+    Returns:
+        New list of TestRecord instances with failure messages attached.
+    """
+    result: list[TestRecord] = []
+    for record in records:
+        if record.status == TestStatus.FAILED and record.name in failure_messages:
+            result.append(TestRecord(
+                name=record.name,
+                status=record.status,
+                module=record.module,
+                duration_seconds=record.duration_seconds,
+                output_lines=record.output_lines,
+                line_number=record.line_number,
+                failure_message=failure_messages[record.name],
+            ))
+        else:
+            result.append(record)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Go test output parsing
+# ---------------------------------------------------------------------------
+
+
+def _parse_go_test_output(
+    lines: tuple[str, ...],
+    raw_output: str,
+) -> ParseResult:
+    """Parse go test output into structured records.
+
+    Extracts test results from:
+    1. ``=== RUN`` lines to track test names
+    2. ``--- PASS/FAIL/SKIP`` lines for results with duration
+    3. Log lines between RUN and result for failure messages
+
+    Handles subtests (``TestParent/subtest``) by tracking the full
+    test path.
+
+    Args:
+        lines: Stripped, ANSI-free output lines.
+        raw_output: Original raw output for truncation detection.
+
+    Returns:
+        ParseResult with all extracted records.
+    """
+    records: list[TestRecord] = []
+    # Track log lines per test for failure messages
+    test_log_lines: dict[str, list[str]] = {}
+    current_test: str | None = None
+
+    _go_run_re = re.compile(r"^=== RUN\s+(\S+)")
+    _go_result_re = re.compile(
+        r"^--- (PASS|FAIL|SKIP): (\S+) \((\d+\.\d+)s\)"
+    )
+    _go_log_re = re.compile(r"^\s+\S+\.go:\d+: (.+)")
+    _go_pkg_result_re = re.compile(
+        r"^(ok|FAIL)\s+\S+\s+\d+\.\d+s"
+    )
+
+    _go_status_map = {
+        "PASS": TestStatus.PASSED,
+        "FAIL": TestStatus.FAILED,
+        "SKIP": TestStatus.SKIPPED,
+    }
+
+    for line_number, line in enumerate(lines):
+        # Track current test from RUN lines
+        run_match = _go_run_re.match(line)
+        if run_match is not None:
+            test_name = run_match.group(1)
+            current_test = test_name
+            if test_name not in test_log_lines:
+                test_log_lines[test_name] = []
+            continue
+
+        # Capture log lines for the current test
+        log_match = _go_log_re.match(line)
+        if log_match is not None and current_test is not None:
+            test_log_lines[current_test].append(log_match.group(1))
+            continue
+
+        # Parse result lines
+        result_match = _go_result_re.match(line)
+        if result_match is not None:
+            status_str = result_match.group(1)
+            test_name = result_match.group(2)
+            duration = float(result_match.group(3))
+            status = _go_status_map.get(status_str, TestStatus.ERROR)
+
+            # Build failure message from collected log lines
+            failure_message: str | None = None
+            if status == TestStatus.FAILED:
+                log_entries = test_log_lines.get(test_name, [])
+                if log_entries:
+                    failure_message = "\n".join(log_entries)
+
+            # Skip parent test results that just aggregate subtests
+            # (parent appears after subtests with same prefix)
+            is_parent = any(
+                r.name.startswith(test_name + "/") for r in records
+            )
+            if is_parent:
+                continue
+
+            records.append(TestRecord(
+                name=test_name,
+                status=status,
+                module="",
+                duration_seconds=duration,
+                line_number=line_number,
+                failure_message=failure_message,
+            ))
+            current_test = None
+            continue
+
+    has_pkg_result = any(
+        re.match(r"^(ok|FAIL)\s+\S+\s+\d+\.\d+s", line) for line in lines
+    )
+    records_tuple = tuple(records)
+    truncated = not has_pkg_result and len(records_tuple) > 0
+
+    return ParseResult(
+        records=records_tuple,
+        truncated=truncated,
+        framework_hint=FrameworkHint.GO_TEST,
+        total_lines_parsed=len(lines),
+        raw_tail=_extract_raw_tail(lines),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Truncation detection
 # ---------------------------------------------------------------------------
 
@@ -456,6 +852,9 @@ def _parse_pytest_output(
     2. Short result lines (module .F.s)
     3. Partial test lines (module::test without status -- INCOMPLETE)
 
+    After extracting test records, scans the FAILURES section to attach
+    failure messages to the corresponding failed test records.
+
     Args:
         lines: Stripped, ANSI-free output lines.
         raw_output: Original raw output for truncation detection.
@@ -514,6 +913,10 @@ def _parse_pytest_output(
             if not already_has:
                 records.append(partial)
 
+    # Extract failure messages and attach to failed records
+    failure_messages = _extract_pytest_failure_messages(lines)
+    records = _attach_pytest_failure_messages(records, failure_messages)
+
     records_tuple = tuple(records)
     truncated = _detect_truncation(lines, records_tuple, has_summary, raw_output)
 
@@ -524,6 +927,48 @@ def _parse_pytest_output(
         total_lines_parsed=len(lines),
         raw_tail=_extract_raw_tail(lines),
     )
+
+
+def _attach_pytest_failure_messages(
+    records: list[TestRecord],
+    failure_messages: dict[str, str],
+) -> list[TestRecord]:
+    """Attach failure messages to failed pytest test records.
+
+    Matches failure block names to test record names. Pytest failure
+    block names use the short test function name (e.g., ``test_register``),
+    while test record names may include the class prefix
+    (e.g., ``TestAuth::test_register``).
+
+    Args:
+        records: Original test records.
+        failure_messages: Dict mapping short test names to failure text.
+
+    Returns:
+        New list of TestRecord instances with failure messages attached.
+    """
+    result: list[TestRecord] = []
+    for record in records:
+        if record.status == TestStatus.FAILED:
+            # Try exact match first, then match by last part of name
+            message = failure_messages.get(record.name)
+            if message is None:
+                # Try short name (last part after ::)
+                short_name = record.name.rsplit("::", 1)[-1]
+                message = failure_messages.get(short_name)
+            if message is not None:
+                result.append(TestRecord(
+                    name=record.name,
+                    status=record.status,
+                    module=record.module,
+                    duration_seconds=record.duration_seconds,
+                    output_lines=record.output_lines,
+                    line_number=record.line_number,
+                    failure_message=message,
+                ))
+                continue
+        result.append(record)
+    return result
 
 
 def _find_last_meaningful_line(
@@ -600,6 +1045,12 @@ def parse_interrupted_output(
     # Parse based on framework
     if detected == FrameworkHint.PYTEST:
         return _parse_pytest_output(lines, raw_output)
+
+    if detected == FrameworkHint.JEST:
+        return _parse_jest_output(lines, raw_output)
+
+    if detected == FrameworkHint.GO_TEST:
+        return _parse_go_test_output(lines, raw_output)
 
     # For unknown frameworks, still try pytest patterns (common fallback)
     # Then fall back to returning no records

@@ -1,0 +1,120 @@
+goal: "Replace the one-shot LLM translation in the Jules SSH Test Runner Daemon with a true agent loop. The LLM gets a ToolRegistry of 10 tools it can call iteratively (think-act cycles), observe results including failures, and propose corrections. Every SSH command still requires explicit human approval. Starting from the v1.2-mvp codebase (commit caf65d5)."
+task_type: code
+brownfield_context:
+  project_type: brownfield
+  context_references:
+    - path: "/workspaces/jules/experiments/jules-agent-loop-rescope/src/jules_daemon/"
+      description: "Jules daemon source code (v1.2-mvp baseline)"
+      role: "primary"
+  existing_patterns:
+    - "Frozen dataclasses for immutable data models"
+    - "asyncio.to_thread for blocking I/O (paramiko, wiki file ops)"
+    - "Wiki persistence with YAML frontmatter + markdown body"
+    - "IPC via Unix socket (TCP on Windows) with framed MessageEnvelope protocol"
+    - "RequestHandler dispatches verbs to sync/async handler methods"
+  existing_dependencies:
+    - "openai>=1.30 (LLM client with custom base_url for Dataiku Mesh)"
+    - "paramiko>=3.0 (SSH execution)"
+    - "pydantic>=2.7 (models)"
+    - "pyyaml>=6.0 (wiki frontmatter)"
+constraints:
+  - "Agent loop as default path for NL command processing. One-shot path retained as fallback when: (a) LLM not configured, (b) agent loop init fails, (c) explicit --one-shot flag"
+  - "Read-only tools (read_wiki, lookup_test_spec, check_remote_processes, read_output, parse_test_output) run freely without human approval"
+  - "State-changing tools (propose_ssh_command, execute_ssh) require explicit human approval via CONFIRM_PROMPT"
+  - "execute_ssh can only be called with a command previously approved by propose_ssh_command in the same loop session"
+  - "One think-act cycle = one iteration. A cycle consists of: LLM receives history, LLM returns tool calls, daemon executes tools, results appended. Multiple tool calls per cycle allowed"
+  - "Hard cap of 5 iterations per command (configurable). Stop conditions are OR-composed: max iterations, LLM returns no tool calls, user cancels"
+  - "Transient errors (LLM timeout, network blip) retry up to 2 times within the same iteration. If all retries fail, fall back to one-shot path"
+  - "Permanent errors (user denial, SSH auth failure, user cancel, malformed LLM response) terminate the loop immediately"
+  - "ToolRegistry pattern from Day 1: Tool protocol with name, description, parameters (JSON schema), execute(args). Registry with register(), get(), list_tools(), execute(). Serializes to OpenAI-compatible function schemas"
+  - "Test catalog stored as hybrid wiki files: user creates starter spec (command_template, required_args), daemon augments (typical_duration, failure_patterns, summary_fields)"
+  - "Missing required arguments: always ask user via ask_user_question tool. No guessing, no auto-defaults"
+  - "Notification channel: persistent CLI subscription connection for real-time daemon push events"
+  - "Real-time analysis: daemon does background regex pattern matching on output. LLM invoked only on user status query, daemon anomaly triggers, or test completion"
+  - "JIRA integration deferred to Phase 2.6+. show_draft_to_user also deferred"
+  - "Python >= 3.12, cross-platform (Linux + Windows)"
+  - "All existing 5408 tests must continue to pass"
+acceptance_criteria:
+  - "Agent loop infrastructure exists: Tool protocol, ToolRegistry, AgentLoop executor with think-act cycle state machine"
+  - "10 baseline tools implemented: read_wiki, lookup_test_spec, check_remote_processes, propose_ssh_command, execute_ssh, read_output, parse_test_output, summarize_run, ask_user_question, notify_user"
+  - "Each tool wraps existing daemon functionality (no reimplementation): read_wiki wraps command_translation + test_knowledge, execute_ssh wraps run_pipeline, etc."
+  - "Agent loop replaces _handle_run as the default path for NL commands in request_handler.py"
+  - "One-shot fallback path works when LLM is disabled (backward compatible with v1.2-mvp)"
+  - "Demo 1: Agent runs a named test end-to-end (NL input -> wiki test spec lookup -> ask missing args -> propose command -> approve -> SSH execute -> summary)"
+  - "Demo 2: Agent self-corrects a failed command (first attempt fails with non-zero exit -> agent observes error -> proposes corrected command -> user approves -> retry succeeds)"
+  - "Demo 3: Agent asks for missing args via wiki test catalog (user provides partial args -> reads spec -> ask_user_question for each missing required arg -> completes flow)"
+  - "Max 5 iterations enforced with configurable cap"
+  - "Transient error retry (2x) with one-shot fallback works"
+  - "Permanent error (user denial) terminates loop immediately"
+  - "Persistent notification subscription: CLI opens long-lived connection, daemon pushes completion and alert events"
+  - "Background regex pattern matching on test output for anomaly detection (failure rate spike, stall, error keywords)"
+  - "80%+ test coverage on all new agent/ code"
+  - "No performance regression on direct commands (commands starting with known executables bypass the agent loop)"
+ontology_schema:
+  name: AgentLoopDomain
+  description: "Domain model for the Phase 2.5 agent loop with tool calling, iteration tracking, and notification infrastructure"
+  fields:
+    - name: tool_name
+      type: string
+      description: "Unique identifier for a registered tool"
+      required: true
+    - name: tool_result
+      type: object
+      description: "Result from a tool invocation: success, output, error"
+      required: true
+    - name: iteration_count
+      type: number
+      description: "Current think-act cycle count within the loop"
+      required: true
+    - name: max_iterations
+      type: number
+      description: "Configurable hard cap on iterations"
+      required: true
+    - name: loop_status
+      type: string
+      description: "Agent loop state: running, completed, failed, cancelled, fallback"
+      required: true
+    - name: approval_state
+      type: string
+      description: "Current approval state for a proposed command: pending, approved, denied, edited"
+      required: true
+    - name: test_spec
+      type: object
+      description: "Wiki-backed test catalog entry: command_template, required_args, summary_fields"
+      required: true
+    - name: notification_event
+      type: object
+      description: "Daemon event pushed to CLI subscribers: type, message, severity, timestamp"
+      required: true
+evaluation_principles:
+  - name: approval_enforcement
+    description: "execute_ssh can only run commands previously approved by propose_ssh_command"
+    weight: 1.0
+  - name: iteration_safety
+    description: "Loop never exceeds max_iterations and terminates cleanly"
+    weight: 0.95
+  - name: backward_compatibility
+    description: "One-shot path works identically to v1.2-mvp when LLM is disabled"
+    weight: 0.9
+  - name: self_correction
+    description: "Agent observes command failure, proposes correction, retries after approval"
+    weight: 0.85
+  - name: test_catalog_integration
+    description: "Agent reads wiki test specs, detects missing args, and asks user"
+    weight: 0.8
+  - name: notification_delivery
+    description: "Persistent subscription delivers completion and alert events to CLI"
+    weight: 0.75
+  - name: error_resilience
+    description: "Transient errors retry gracefully, permanent errors terminate cleanly"
+    weight: 0.8
+exit_conditions:
+  - name: phase_2_5_complete
+    description: "Agent loop replaces one-shot as default path with full tool surface"
+    criteria: "All 10 tools functional AND 3 demo scenarios pass AND one-shot fallback works AND 80%+ coverage on new code AND all existing tests pass"
+metadata:
+  seed_id: seed_phase25_manual
+  version: 1.0.0
+  created_at: "2026-04-12T03:00:00Z"
+  ambiguity_score: 0.148
+  interview_id: interview_20260412_003810

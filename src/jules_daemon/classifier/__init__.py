@@ -11,9 +11,15 @@ Modules:
     scorer: Structuredness scorer (0.0 = NL, 1.0 = structured)
     nl_extractor: Heuristic NL intent and argument extraction
     classify: Unified classify() entry point
+    direct_command: Direct-command detector for agent loop bypass
 """
 
 from jules_daemon.classifier.classify import classify
+from jules_daemon.classifier.direct_command import (
+    DEFAULT_KNOWN_EXECUTABLES,
+    DirectCommandDetection,
+    detect_direct_command,
+)
 from jules_daemon.classifier.models import (
     ClassificationResult,
     InputType,
@@ -40,6 +46,8 @@ from jules_daemon.classifier.verb_registry import (
 __all__ = [
     "CANONICAL_VERBS",
     "ClassificationResult",
+    "DEFAULT_KNOWN_EXECUTABLES",
+    "DirectCommandDetection",
     "InputType",
     "NLAuditResult",
     "NLExtraction",
@@ -48,6 +56,7 @@ __all__ = [
     "classify",
     "classify_with_audit",
     "compute_structuredness_score",
+    "detect_direct_command",
     "extract_from_natural_language",
     "get_aliases_for_verb",
     "resolve_canonical_verb",

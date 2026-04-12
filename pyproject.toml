@@ -24,6 +24,7 @@ dev = [
 [project.scripts]
 jules-daemon = "jules_daemon.__main__:main"
 jules = "jules_daemon.cli_main:main"
+jules-demo = "jules_daemon.demo_runner:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jules_daemon"]
@@ -34,3 +35,9 @@ pythonpath = ["src"]
 
 [tool.coverage.run]
 source = ["jules_daemon"]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.20.0",
+    "ruff>=0.15.10",
+]

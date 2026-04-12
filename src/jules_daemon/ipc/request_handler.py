@@ -94,12 +94,20 @@ from jules_daemon.ipc.framing import (
     encode_frame,
     unpack_header,
 )
+from jules_daemon.classifier.direct_command import (
+    DirectCommandDetection,
+    detect_direct_command,
+)
+from jules_daemon.ipc.notification_broadcaster import NotificationBroadcaster
+from jules_daemon.ipc.notification_emitter import (
+    emit_agent_loop_completion,
+    emit_run_completion,
+)
 from jules_daemon.ipc.request_validator import validate_request
 from jules_daemon.ipc.server import ClientConnection
 from jules_daemon.ssh.credentials import resolve_ssh_credentials
 from jules_daemon.wiki import current_run as current_run_io
 from jules_daemon.wiki.command_queue import CommandQueue
-from jules_daemon.wiki.run_promotion import list_history, read_history_entry
 from jules_daemon.wiki.test_knowledge import (
     TestKnowledge,
     derive_test_slug,
@@ -123,6 +131,7 @@ if TYPE_CHECKING:
 __all__ = [
     "RequestHandler",
     "RequestHandlerConfig",
+    "detect_direct_command",
     "is_direct_command",
 ]
 
@@ -277,11 +286,23 @@ class RequestHandlerConfig:
             When ``None``, LLM translation is disabled and natural-language
             input is used as-is (backward-compatible behavior).
         llm_config: Optional LLMConfig required when *llm_client* is set.
+        one_shot: When ``True``, forces the one-shot LLM translation
+            path even when the agent loop is available. Defaults to
+            ``False`` (agent loop is the default for NL commands).
+        max_agent_iterations: Hard cap on think-act-observe cycles per
+            agent loop invocation. Defaults to 5.
+        notification_broadcaster: Optional broadcaster for pushing
+            completion and alert events to subscribed CLI clients.
+            When ``None``, no notification events are emitted (the
+            notification channel is effectively disabled).
     """
 
     wiki_root: Path
     llm_client: OpenAI | None = None
     llm_config: LLMConfig | None = None
+    one_shot: bool = False
+    max_agent_iterations: int = 5
+    notification_broadcaster: NotificationBroadcaster | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +328,31 @@ _AsyncClientVerbHandler = Callable[
 def _now_iso() -> str:
     """Return current UTC time as ISO 8601 string."""
     return datetime.now(timezone.utc).isoformat()
+
+
+class _RegistryDispatcher:
+    """Thin adapter bridging ToolRegistry to the ToolDispatcher protocol.
+
+    The AgentLoop expects a ``ToolDispatcher`` with a ``dispatch(call)``
+    method, while ToolRegistry exposes ``execute(call)``. This adapter
+    satisfies the protocol contract without modifying either class.
+    """
+
+    __slots__ = ("_registry",)
+
+    def __init__(self, registry: Any) -> None:
+        self._registry = registry
+
+    async def dispatch(self, call: Any) -> Any:
+        """Delegate to ToolRegistry.execute().
+
+        Args:
+            call: A ToolCall instance.
+
+        Returns:
+            ToolResult from the registry.
+        """
+        return await self._registry.execute(call)
 
 
 def _build_error_response(
@@ -428,6 +474,30 @@ class RequestHandler:
             "run": self._handle_run,
             "watch": self._handle_watch,
         }
+
+    # -- Agent loop availability -------------------------------------------------
+
+    @property
+    def _can_use_agent_loop(self) -> bool:
+        """Determine whether the agent loop is available for NL commands.
+
+        The agent loop requires:
+        1. LLM client is configured (llm_client and llm_config are set)
+        2. one_shot mode is not forced via config flag
+
+        When any condition fails, the handler falls back to the v1.2-mvp
+        one-shot LLM translation path.
+
+        Returns:
+            True if the agent loop can be initialized for this request.
+        """
+        if self._config.one_shot:
+            return False
+        if self._config.llm_client is None:
+            return False
+        if self._config.llm_config is None:
+            return False
+        return True
 
     async def handle_message(
         self,
@@ -801,7 +871,383 @@ class RequestHandler:
         parsed: dict[str, Any],
         client: ClientConnection,
     ) -> MessageEnvelope:
-        """Execute a run command with confirmation, collision check, and background execution.
+        """Route run commands to the appropriate execution path.
+
+        Direct commands (starting with known executables) always use the
+        one-shot path. Natural language commands use the agent loop by
+        default, with one-shot as fallback when:
+          (a) LLM is not configured
+          (b) Agent loop initialization fails
+          (c) Explicit ``--one-shot`` flag is set in config
+
+        Args:
+            msg_id: Correlation ID from the original request.
+            parsed: Validated payload with target_host, target_user,
+                natural_language, and optional target_port.
+            client: Connection context with reader/writer for the
+                confirmation exchange.
+
+        Returns:
+            RESPONSE envelope with started/completed/denied status.
+        """
+        natural_language = parsed.get("natural_language", "")
+
+        # Fast, sub-millisecond direct-command detection. When the input
+        # starts with a known executable (pytest, python3, ./script, etc.)
+        # the agent loop is bypassed entirely and the command goes straight
+        # to the SSH approval flow -- preserving v1.2-mvp latency.
+        detection = detect_direct_command(natural_language)
+
+        if detection.bypass_agent_loop:
+            logger.debug(
+                "Direct command detected (executable=%s, confidence=%.1f), "
+                "bypassing agent loop: %s",
+                detection.executable,
+                detection.confidence,
+                natural_language[:80],
+            )
+            return await self._handle_run_oneshot(
+                msg_id, parsed, client, detection=detection,
+            )
+
+        # NL commands: try agent loop first if available
+        if self._can_use_agent_loop:
+            try:
+                return await self._handle_run_agent_loop(
+                    msg_id, parsed, client,
+                )
+            except Exception as exc:
+                # Import here to avoid top-level coupling to agent module
+                try:
+                    from jules_daemon.agent.error_classification import (
+                        RetryExhaustedError,
+                    )
+                    is_retry_exhausted = isinstance(exc, RetryExhaustedError)
+                except ImportError:
+                    is_retry_exhausted = False
+
+                if is_retry_exhausted:
+                    logger.warning(
+                        "Agent loop transient retries exhausted for "
+                        "msg_id=%s (iterations=%d), falling back to "
+                        "one-shot LLM translation: %s",
+                        msg_id,
+                        getattr(exc, "iterations_used", 0),
+                        exc,
+                    )
+                else:
+                    logger.warning(
+                        "Agent loop failed for msg_id=%s, "
+                        "falling back to one-shot: %s",
+                        msg_id,
+                        exc,
+                    )
+                # Fall through to one-shot path
+
+        # Fallback: one-shot LLM translation (v1.2-mvp behavior)
+        return await self._handle_run_oneshot(msg_id, parsed, client)
+
+    async def _handle_run_agent_loop(
+        self,
+        msg_id: str,
+        parsed: dict[str, Any],
+        client: ClientConnection,
+    ) -> MessageEnvelope:
+        """Execute a run command via the iterative agent loop.
+
+        The agent loop replaces the one-shot LLM translation path for
+        natural language commands. The LLM receives a ToolRegistry of
+        tools it can call iteratively (think-act cycles), observe results
+        including failures, and propose corrections.
+
+        Flow:
+        1. Build the ToolRegistry with all 10 tools
+        2. Create IPC callback bridges (confirm, ask, notify)
+        3. Create the LLM adapter and agent loop
+        4. Run the agent loop with the user's NL input
+        5. Interpret the result and return a response envelope
+
+        Every SSH command requires explicit human approval via the
+        propose_ssh_command tool. execute_ssh can only run commands
+        previously approved in the same loop session.
+
+        Args:
+            msg_id: Correlation ID from the original request.
+            parsed: Validated payload with target_host, target_user,
+                natural_language, and optional target_port.
+            client: Connection context for IPC callbacks.
+
+        Returns:
+            RESPONSE envelope with the agent loop result.
+
+        Raises:
+            Exception: If the agent loop cannot be initialized (triggers
+                fallback to one-shot in the caller).
+        """
+        from jules_daemon.agent.agent_loop import (
+            AgentLoop,
+            AgentLoopConfig,
+            AgentLoopState,
+        )
+        from jules_daemon.agent.ipc_bridge import (
+            make_ask_callback,
+            make_confirm_callback,
+            make_notify_callback,
+        )
+        from jules_daemon.agent.llm_adapter import OpenAILLMAdapter
+        from jules_daemon.agent.tool_registry import ToolRegistry
+        from jules_daemon.agent.tools.registry_factory import build_tool_set
+
+        natural_language = parsed.get("natural_language", "")
+        target_host = parsed.get("target_host", "")
+        target_user = parsed.get("target_user", "")
+        target_port = parsed.get("target_port", 22)
+
+        logger.info(
+            "Starting agent loop for msg_id=%s: '%s' on %s@%s:%d",
+            msg_id,
+            natural_language[:80],
+            target_user,
+            target_host,
+            target_port,
+        )
+
+        # Build IPC callback bridges
+        confirm_cb = make_confirm_callback(client)
+        ask_cb = make_ask_callback(client)
+        notify_cb = make_notify_callback(client)
+
+        # Build the tool registry with all 10 tools
+        llm_model = (
+            self._config.llm_config.default_model
+            if self._config.llm_config is not None
+            else None
+        )
+
+        tools = build_tool_set(
+            wiki_root=self._config.wiki_root,
+            confirm_callback=confirm_cb,
+            ask_callback=ask_cb,
+            notify_callback=notify_cb,
+            llm_client=self._config.llm_client,
+            llm_model=llm_model,
+        )
+
+        registry = ToolRegistry()
+        for tool in tools:
+            registry.register(tool)
+
+        logger.debug(
+            "Agent tool registry initialized: %s",
+            registry.list_tool_names(),
+        )
+
+        # Build the LLM adapter
+        tool_schemas = registry.to_openai_schemas()
+        llm_adapter = OpenAILLMAdapter(
+            client=self._config.llm_client,
+            model=self._config.llm_config.default_model,
+            tool_schemas=tool_schemas,
+        )
+
+        # Build the system prompt with host context
+        system_prompt = self._build_agent_system_prompt(
+            target_host=target_host,
+            target_user=target_user,
+            target_port=target_port,
+        )
+
+        # Wrap registry in a dispatcher adapter that satisfies the
+        # ToolDispatcher protocol (dispatch method delegates to execute).
+        dispatcher = _RegistryDispatcher(registry)
+
+        # Create and run the agent loop
+        loop_config = AgentLoopConfig(
+            max_iterations=self._config.max_agent_iterations,
+        )
+        agent_loop = AgentLoop(
+            llm_client=llm_adapter,
+            tool_dispatcher=dispatcher,
+            system_prompt=system_prompt,
+            config=loop_config,
+        )
+
+        result = await agent_loop.run(natural_language)
+
+        logger.info(
+            "Agent loop finished for msg_id=%s: state=%s, "
+            "iterations=%d, error=%s, retry_exhausted=%s",
+            msg_id,
+            result.final_state.value,
+            result.iterations_used,
+            result.error_message,
+            result.retry_exhausted,
+        )
+
+        # Emit notification event for the agent loop result. This is
+        # fire-and-forget: notification delivery failures never affect
+        # the response to the requesting client.
+        try:
+            await emit_agent_loop_completion(
+                broadcaster=self._config.notification_broadcaster,
+                loop_result=result,
+                natural_language_command=natural_language,
+                run_id=msg_id,
+            )
+        except Exception as notify_exc:
+            logger.warning(
+                "Failed to emit agent loop notification for msg_id=%s: %s",
+                msg_id,
+                notify_exc,
+            )
+
+        # If retries were exhausted (transient errors persisted through
+        # all retry attempts), raise RetryExhaustedError to signal the
+        # caller (_handle_run) to fall back to the one-shot path.
+        if result.retry_exhausted:
+            from jules_daemon.agent.error_classification import (
+                RetryExhaustedError,
+            )
+
+            raise RetryExhaustedError(
+                result.error_message or "Transient error retries exhausted",
+                iterations_used=result.iterations_used,
+            )
+
+        # Translate the agent loop result into a response envelope
+        if result.final_state is AgentLoopState.COMPLETE:
+            return _build_success_response(
+                msg_id=msg_id,
+                verb="run",
+                extra={
+                    "status": "completed",
+                    "mode": "agent_loop",
+                    "iterations_used": result.iterations_used,
+                    "message": (
+                        f"Agent loop completed in {result.iterations_used} "
+                        f"iteration(s)."
+                    ),
+                },
+            )
+        elif result.final_state is AgentLoopState.ERROR:
+            error_msg = result.error_message or "Agent loop terminated"
+
+            # Check if this was a user denial (should return denied status)
+            if "denied" in error_msg.lower():
+                return _build_success_response(
+                    msg_id=msg_id,
+                    verb="run",
+                    extra={
+                        "status": "denied",
+                        "mode": "agent_loop",
+                        "iterations_used": result.iterations_used,
+                        "message": error_msg,
+                    },
+                )
+
+            return _build_success_response(
+                msg_id=msg_id,
+                verb="run",
+                extra={
+                    "status": "agent_error",
+                    "mode": "agent_loop",
+                    "iterations_used": result.iterations_used,
+                    "error": error_msg,
+                    "message": error_msg,
+                },
+            )
+        else:
+            # Unexpected terminal state -- should not happen
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary=(
+                    f"Agent loop ended in unexpected state: "
+                    f"{result.final_state.value}"
+                ),
+                validation_errors=[],
+            )
+
+    def _build_agent_system_prompt(
+        self,
+        *,
+        target_host: str,
+        target_user: str,
+        target_port: int,
+    ) -> str:
+        """Build the system prompt for the agent loop.
+
+        Includes:
+        - Role definition and behavioral constraints
+        - SSH target context (host, user, port)
+        - Wiki translation history (if available)
+        - Test catalog awareness
+        - Security constraints (approval requirements)
+
+        Args:
+            target_host: Remote hostname or IP address.
+            target_user: SSH username.
+            target_port: SSH port number.
+
+        Returns:
+            The system prompt string.
+        """
+        wiki_context_lines = self._build_wiki_context(
+            target_host=target_host,
+        )
+        wiki_block = "\n".join(wiki_context_lines) if wiki_context_lines else ""
+
+        prompt_parts: list[str] = [
+            "You are Jules, an SSH test runner assistant. You help users "
+            "run tests on remote servers by translating natural language "
+            "requests into SSH commands.",
+            "",
+            "## SSH Target",
+            f"- Host: {target_host}",
+            f"- User: {target_user}",
+            f"- Port: {target_port}",
+            "",
+            "## Rules",
+            "1. ALWAYS use propose_ssh_command to propose a command before "
+            "executing it. NEVER skip the approval step.",
+            "2. After getting approval, use execute_ssh with the approval_id "
+            "to run the command.",
+            "3. If a command fails, analyze the error and propose a corrected "
+            "command. Do NOT repeat the same failing command.",
+            "4. If required arguments are missing from a test specification, "
+            "use ask_user_question to ask the user. NEVER guess or "
+            "auto-default missing required arguments.",
+            "5. Use read_wiki and lookup_test_spec to find information "
+            "about available tests and their configurations.",
+            "6. Use check_remote_processes before proposing a command if "
+            "you suspect other tests may be running.",
+            "7. When done, stop calling tools to signal completion.",
+            "",
+            "## Available Information",
+            "- Wiki pages contain test documentation and specifications.",
+            "- Test specs define command templates and required arguments.",
+            "- Past command history helps with command format.",
+        ]
+
+        if wiki_block:
+            prompt_parts.extend([
+                "",
+                "## Past Commands on This Host",
+                wiki_block,
+            ])
+
+        return "\n".join(prompt_parts)
+
+    async def _handle_run_oneshot(
+        self,
+        msg_id: str,
+        parsed: dict[str, Any],
+        client: ClientConnection,
+        *,
+        detection: DirectCommandDetection | None = None,
+    ) -> MessageEnvelope:
+        """Execute a run command with the v1.2-mvp one-shot path.
+
+        One-shot confirmation, collision check, and background execution.
 
         Full flow:
         1. Extract target host, user, port, and command from parsed payload
@@ -819,6 +1265,11 @@ class RequestHandler:
                 natural_language, and optional target_port.
             client: Connection context with reader/writer for the
                 confirmation exchange.
+            detection: Optional pre-computed DirectCommandDetection from
+                the caller (_handle_run). When provided, the one-shot path
+                reuses the result instead of re-running detection. This
+                avoids double-detection and keeps the audit chain
+                consistent with the routing decision.
 
         Returns:
             RESPONSE envelope with started status or denial.
@@ -858,11 +1309,21 @@ class RequestHandler:
         # Determine the proposed command: if the input is a direct shell
         # command (starts with a known executable), use it as-is.
         # Otherwise, attempt LLM translation via the Dataiku Mesh endpoint.
-        direct_command = is_direct_command(natural_language)
+        #
+        # When a pre-computed detection is passed from _handle_run(), we
+        # reuse it directly instead of re-running the classifier. This
+        # preserves the single-detection-per-request invariant and avoids
+        # redundant work on the bypass path.
+        if detection is None:
+            detection = detect_direct_command(natural_language)
+
+        direct_command = detection.is_direct_command
         if direct_command:
             proposed_command = natural_language
             logger.debug(
-                "Input recognized as direct command, skipping LLM: %s",
+                "Input recognized as direct command (executable=%s), "
+                "skipping LLM: %s",
+                detection.executable,
                 natural_language[:80],
             )
         else:
@@ -932,7 +1393,7 @@ class RequestHandler:
             )
             try:
                 await self._send_envelope(client, queue_prompt)
-            except Exception as exc:
+            except Exception:
                 return _build_error_response(
                     msg_id=msg_id,
                     error_summary="Failed to send queue prompt",
@@ -1166,7 +1627,7 @@ class RequestHandler:
         # Save the approved translation to the wiki so future NL requests
         # on this host can use it as context. Only save NL-translated commands
         # (skip direct commands since there's nothing to learn there).
-        if not is_direct_command(natural_language):
+        if not direct_command:
             try:
                 from jules_daemon.wiki.command_translation import (
                     CommandTranslation,
@@ -1495,7 +1956,6 @@ class RequestHandler:
                     Command as WikiCommand,
                     CurrentRun,
                     ProcessIDs,
-                    Progress,
                     RunStatus,
                     SSHTarget,
                 )
@@ -1563,6 +2023,23 @@ class RequestHandler:
             result.success,
             result.exit_code,
         )
+
+        # Emit completion notification to any subscribed CLI clients.
+        # Fire-and-forget: notification delivery failures never affect
+        # the run outcome or the watch stream.
+        try:
+            await emit_run_completion(
+                broadcaster=self._config.notification_broadcaster,
+                run_result=result,
+                natural_language_command=command,
+            )
+        except Exception as notify_exc:
+            logger.warning(
+                "Failed to emit run completion notification for "
+                "run_id=%s: %s",
+                result.run_id,
+                notify_exc,
+            )
 
         # Signal end-of-stream to any watch subscribers
         try:

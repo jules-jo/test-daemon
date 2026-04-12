@@ -273,6 +273,29 @@ from jules_daemon.protocol.validation import (
 )
 
 # ---------------------------------------------------------------------------
+# Notification channel (from notifications)
+# ---------------------------------------------------------------------------
+
+from jules_daemon.protocol.notifications import (
+    HEARTBEAT_DEFAULT_INTERVAL_SECONDS,
+    NOTIFICATION_CHANNEL_VERSION,
+    AlertNotification,
+    CompletionNotification,
+    HeartbeatNotification,
+    NotificationEnvelope,
+    NotificationEventType,
+    NotificationPayloadType,
+    NotificationSeverity,
+    SubscribeRequest,
+    SubscribeResponse,
+    TestOutcomeSummary,
+    UnsubscribeRequest,
+    UnsubscribeResponse,
+    create_notification_envelope,
+    parse_notification_event_type,
+)
+
+# ---------------------------------------------------------------------------
 # Convenience aliases
 #
 # ``serialize`` and ``deserialize`` are the primary entry points for
@@ -363,4 +386,21 @@ __all__ = [
     "get_payload_schema",
     "list_payload_types",
     "validate_message",
+    # -- Notification channel --
+    "HEARTBEAT_DEFAULT_INTERVAL_SECONDS",
+    "NOTIFICATION_CHANNEL_VERSION",
+    "AlertNotification",
+    "CompletionNotification",
+    "HeartbeatNotification",
+    "NotificationEnvelope",
+    "NotificationEventType",
+    "NotificationPayloadType",
+    "NotificationSeverity",
+    "SubscribeRequest",
+    "SubscribeResponse",
+    "TestOutcomeSummary",
+    "UnsubscribeRequest",
+    "UnsubscribeResponse",
+    "create_notification_envelope",
+    "parse_notification_event_type",
 ]

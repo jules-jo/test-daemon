@@ -80,6 +80,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Skip the scan-probe-mark pipeline on startup",
     )
+    parser.add_argument(
+        "--one-shot",
+        action="store_true",
+        default=False,
+        help=(
+            "Force one-shot LLM translation mode instead of the agent loop. "
+            "When set, natural-language commands are translated in a single "
+            "LLM call (v1.2-mvp behavior) rather than using the iterative "
+            "agent loop."
+        ),
+    )
     return parser
 
 
@@ -196,6 +207,7 @@ async def _run_daemon(
     wiki_dir: Path,
     socket_path: Path,
     skip_scan: bool,
+    one_shot: bool = False,
 ) -> int:
     """Run the daemon lifecycle.
 
@@ -209,6 +221,8 @@ async def _run_daemon(
         wiki_dir: Path to the wiki root directory.
         socket_path: Path to the Unix domain socket.
         skip_scan: Whether to skip the startup scan pipeline.
+        one_shot: When True, forces one-shot LLM translation mode
+            instead of the agent loop (v1.2-mvp behavior).
 
     Returns:
         Exit code (0 on success).
@@ -287,7 +301,13 @@ async def _run_daemon(
         wiki_root=wiki_dir,
         llm_client=llm_client,
         llm_config=llm_config,
+        one_shot=one_shot,
     )
+    if one_shot:
+        logger.info(
+            "One-shot mode forced via --one-shot flag; "
+            "agent loop is disabled for this session."
+        )
     handler = RequestHandler(config=handler_config)
 
     # Seed the handler with any crash recovery result so the next CLI
@@ -364,6 +384,7 @@ def main() -> None:
                 wiki_dir=args.wiki_dir,
                 socket_path=socket_path,
                 skip_scan=args.skip_startup_scan,
+                one_shot=args.one_shot,
             )
         )
     except KeyboardInterrupt:

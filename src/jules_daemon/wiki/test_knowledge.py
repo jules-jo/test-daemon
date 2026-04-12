@@ -144,6 +144,10 @@ class TestKnowledge:
         common_failures: Tuple of short failure patterns the test has
             exhibited in past runs. Capped at :data:`_MAX_COMMON_FAILURES`.
         normal_behavior: Description of what a healthy run looks like.
+        required_args: Tuple of argument names that this test requires
+            (e.g., ``("iterations", "host")``). Populated from the user's
+            starter spec in the wiki. The agent loop uses this to detect
+            missing arguments and prompt the user via ask_user_question.
         runs_observed: Number of completed runs the daemon has learned
             from. Incremented on each merge.
         last_updated: UTC timestamp of the most recent merge.
@@ -159,6 +163,7 @@ class TestKnowledge:
     output_format: str = ""
     common_failures: tuple[str, ...] = field(default_factory=tuple)
     normal_behavior: str = ""
+    required_args: tuple[str, ...] = field(default_factory=tuple)
     runs_observed: int = 0
     last_updated: datetime = field(default_factory=_now_utc)
 
@@ -187,6 +192,10 @@ class TestKnowledge:
             lines.append(f"- Output format: {self.output_format}")
         if self.normal_behavior:
             lines.append(f"- Normal behavior: {self.normal_behavior}")
+        if self.required_args:
+            lines.append(
+                f"- Required arguments: {', '.join(self.required_args)}"
+            )
         if self.common_failures:
             lines.append("- Common failure patterns:")
             for failure in self.common_failures:
@@ -430,6 +439,7 @@ def _knowledge_to_frontmatter(knowledge: TestKnowledge) -> dict[str, Any]:
         "purpose": knowledge.purpose,
         "output_format": knowledge.output_format,
         "normal_behavior": knowledge.normal_behavior,
+        "required_args": list(knowledge.required_args),
         "common_failures": list(knowledge.common_failures),
         "runs_observed": knowledge.runs_observed,
         "last_updated": _datetime_to_iso(knowledge.last_updated),
@@ -463,6 +473,22 @@ def _coerce_failures(value: Any) -> tuple[str, ...]:
     return tuple(cleaned)
 
 
+def _coerce_required_args(value: Any) -> tuple[str, ...]:
+    """Coerce a YAML list (or scalar) into a tuple of argument name strings."""
+    if value is None:
+        return ()
+    if isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        items = [value]
+    cleaned: list[str] = []
+    for item in items:
+        text = _coerce_string(item)
+        if text and text not in cleaned:
+            cleaned.append(text)
+    return tuple(cleaned)
+
+
 def _coerce_runs_observed(value: Any) -> int:
     """Coerce the runs_observed field, defaulting to 0 on bad input."""
     if value is None:
@@ -488,6 +514,7 @@ def _frontmatter_to_knowledge(fm: dict[str, Any]) -> TestKnowledge:
         purpose=_coerce_string(fm.get("purpose")),
         output_format=_coerce_string(fm.get("output_format")),
         normal_behavior=_coerce_string(fm.get("normal_behavior")),
+        required_args=_coerce_required_args(fm.get("required_args")),
         common_failures=_coerce_failures(fm.get("common_failures")),
         runs_observed=_coerce_runs_observed(fm.get("runs_observed")),
         last_updated=_iso_to_datetime(fm.get("last_updated")),
@@ -531,6 +558,14 @@ def _build_body(knowledge: TestKnowledge) -> str:
             knowledge.normal_behavior,
             "",
         ])
+    if knowledge.required_args:
+        lines.extend([
+            "## Required Arguments",
+            "",
+        ])
+        for arg in knowledge.required_args:
+            lines.append(f"- `{arg}`")
+        lines.append("")
     if knowledge.common_failures:
         lines.extend([
             "## Common Failures",
