@@ -1428,6 +1428,8 @@ class RequestHandler:
 
         # Translate the agent loop result into a response envelope
         if result.final_state is AgentLoopState.COMPLETE:
+            # Extract test execution summary from the agent's history
+            summary = self._extract_run_summary(result)
             return _build_success_response(
                 msg_id=msg_id,
                 verb="run",
@@ -1435,10 +1437,7 @@ class RequestHandler:
                     "status": "completed",
                     "mode": "agent_loop",
                     "iterations_used": result.iterations_used,
-                    "message": (
-                        f"Agent loop completed in {result.iterations_used} "
-                        f"iteration(s)."
-                    ),
+                    "message": summary or "Test completed.",
                 },
             )
         elif result.final_state is AgentLoopState.ERROR:
@@ -1478,6 +1477,71 @@ class RequestHandler:
                 ),
                 validation_errors=[],
             )
+
+    def _extract_run_summary(self, result: Any) -> str:
+        """Extract a user-facing test summary from the agent loop history.
+
+        Scans the conversation history for execute_ssh and summarize_run
+        tool results. Returns a human-readable summary of what happened.
+        """
+        import json as _json
+
+        execute_result = None
+        summarize_result = None
+
+        for msg in result.history:
+            if msg.get("role") != "tool":
+                continue
+            content = msg.get("content", "")
+            try:
+                data = _json.loads(content) if isinstance(content, str) else {}
+            except (ValueError, TypeError):
+                data = {}
+
+            # Check tool name from the message or infer from content
+            tool_name = msg.get("name", "")
+            if tool_name == "execute_ssh" or "exit_code" in data:
+                execute_result = data
+            elif tool_name == "summarize_run" or "narrative" in data:
+                summarize_result = data
+
+        parts: list[str] = []
+
+        # Use summarize_run result if available (richest summary)
+        if summarize_result:
+            narrative = summarize_result.get("narrative", "")
+            if narrative:
+                parts.append(narrative)
+
+        # Fall back to execute_ssh result
+        if execute_result and not parts:
+            exit_code = execute_result.get("exit_code")
+            success = execute_result.get("success", exit_code == 0)
+            stdout_tail = execute_result.get("stdout_tail", "")
+            stderr_tail = execute_result.get("stderr_tail", "")
+
+            if success:
+                parts.append("Test completed successfully.")
+            else:
+                parts.append(f"Test failed (exit code {exit_code}).")
+
+            if stdout_tail:
+                # Show last few lines of output
+                last_lines = stdout_tail.strip().split("\n")[-5:]
+                parts.append("\n".join(last_lines))
+
+            if stderr_tail and not success:
+                parts.append(f"Stderr: {stderr_tail[:500]}")
+
+        if execute_result:
+            exit_code = execute_result.get("exit_code")
+            duration = execute_result.get("duration_seconds")
+            if exit_code is not None:
+                parts.append(f"Exit code: {exit_code}")
+            if duration is not None:
+                parts.append(f"Duration: {duration:.1f}s")
+
+        return "\n".join(parts) if parts else "Test completed."
 
     def _build_agent_system_prompt(
         self,
