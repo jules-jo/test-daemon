@@ -1,8 +1,20 @@
 # Jules Daemon Wiki
 
-The wiki is the sole persistence backbone for the Jules daemon. All state,
-history, audit logs, and queue data are stored as markdown files with YAML
-frontmatter.
+The local `wiki/` directory serves two roles:
+
+1. it is the daemon's persistence backbone for runtime state
+2. it is the repo-local project wiki for durable architecture knowledge
+
+That only works if the ownership split is respected. Runtime state lives in
+daemon-managed directories. Human or LLM-maintained project documentation
+belongs only in user-managed directories such as `pages/architecture/`,
+`pages/concepts/`, and `schema/`.
+
+This repo-local wiki follows the Karpathy LLM Wiki pattern: sources feed a
+maintained wiki, and the maintenance workflow is defined by a schema file.
+For this repository, the schema lives in `schema/AGENTS.md`, the catalog
+lives in `index.md`, and the append-only maintenance record lives in
+`log.md`.
 
 ## Directory Structure
 
@@ -36,6 +48,7 @@ wiki/
     tools-and-sdks/                  # User-managed: tool documentation
   raw/                               # User-managed: unprocessed notes
   schema/                            # User-managed: schema documentation
+  log.md                             # Chronological repo-local wiki log
 ```
 
 ## Ownership Model
@@ -72,3 +85,10 @@ On startup, the daemon reads `pages/daemon/current-run.md` to detect
 incomplete runs from a previous crash. The scan-probe-mark pipeline
 checks liveness of any active sessions and marks stale ones, ensuring
 recovery within 30 seconds.
+
+## Repo-Local Wiki Guidance
+
+- Read `index.md` first when using the wiki for codebase orientation.
+- Use `schema/AGENTS.md` as the maintenance contract.
+- Update `log.md` when you add durable project knowledge or revise a
+  previously recorded understanding.

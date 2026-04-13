@@ -64,6 +64,8 @@ def build_tool_set(
     llm_model: str | None = None,
     ledger: ApprovalLedger | None = None,
     session_history_provider: SessionHistoryProvider | None = None,
+    run_launcher: Any | None = None,
+    live_output_provider: Any | None = None,
 ) -> tuple[BaseTool, ...]:
     """Construct all 10 agent tools with injected dependencies.
 
@@ -84,6 +86,11 @@ def build_tool_set(
         session_history_provider: Optional callback that returns the current
             conversation history messages. Enables read_output to read
             prior tool results from the agent loop session.
+        run_launcher: Optional async callback for starting daemon-managed
+            background runs. When omitted, execute_ssh falls back to its
+            standalone blocking execute_run behavior.
+        live_output_provider: Optional callback that returns a snapshot of
+            in-memory active-run output for read_output source='live'.
 
     Returns:
         Tuple of 10 BaseTool instances, ready for registry registration.
@@ -99,6 +106,7 @@ def build_tool_set(
         ReadOutputTool(
             wiki_root=wiki_root,
             session_history_provider=session_history_provider,
+            live_output_provider=live_output_provider,
         ),
         ParseTestOutputTool(),
         # State-changing tools (require approval)
@@ -110,6 +118,7 @@ def build_tool_set(
             wiki_root=wiki_root,
             ledger=ledger,
             confirm_callback=confirm_callback,
+            run_launcher=run_launcher,
         ),
         # User interaction tools
         AskUserQuestionTool(ask_callback=ask_callback),

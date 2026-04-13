@@ -17,6 +17,7 @@ Test strategy:
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -464,6 +465,87 @@ class TestAgentLoopResponseHandling:
         assert response.payload["status"] == "completed"
         assert response.payload["mode"] == "agent_loop"
         assert response.payload["iterations_used"] == 2
+
+    @pytest.mark.asyncio
+    async def test_agent_loop_complete_returns_started_for_background_run(
+        self, tmp_path: Path,
+    ) -> None:
+        """Started execute_ssh results should surface a started response."""
+        from jules_daemon.agent.agent_loop import (
+            AgentLoopResult,
+            AgentLoopState,
+        )
+
+        config = RequestHandlerConfig(
+            wiki_root=tmp_path,
+            llm_client=_make_llm_client(),
+            llm_config=_make_llm_config(),
+        )
+        handler = RequestHandler(config=config)
+        client = _make_client()
+
+        mock_result = AgentLoopResult(
+            final_state=AgentLoopState.COMPLETE,
+            iterations_used=3,
+            history=(
+                {"role": "system", "content": "..."},
+                {"role": "user", "content": "run tests"},
+                {
+                    "role": "tool",
+                    "name": "execute_ssh",
+                    "content": json.dumps({
+                        "status": "started",
+                        "run_id": "run-bg-123",
+                        "target_host": "staging.example.com",
+                        "command": "pytest tests/",
+                        "message": (
+                            "Test started. Use 'status' to check progress."
+                        ),
+                    }),
+                },
+            ),
+            error_message=None,
+        )
+
+        with patch(
+            "jules_daemon.agent.agent_loop.AgentLoop",
+        ) as MockAgentLoop:
+            mock_loop_instance = AsyncMock()
+            mock_loop_instance.run.return_value = mock_result
+            MockAgentLoop.return_value = mock_loop_instance
+
+            with patch(
+                "jules_daemon.agent.tools.registry_factory.build_tool_set",
+            ) as mock_build:
+                mock_build.return_value = ()
+
+                with patch(
+                    "jules_daemon.agent.llm_adapter.OpenAILLMAdapter",
+                ):
+                    with patch(
+                        "jules_daemon.agent.tool_registry.ToolRegistry",
+                    ) as MockRegistry:
+                        mock_reg = MagicMock()
+                        mock_reg.to_openai_schemas.return_value = ()
+                        mock_reg.list_tool_names.return_value = ()
+                        MockRegistry.return_value = mock_reg
+
+                        envelope = _make_request(payload={
+                            "verb": "run",
+                            "target_host": "staging.example.com",
+                            "target_user": "deploy",
+                            "natural_language": "run the smoke tests",
+                        })
+
+                        response = await handler.handle_message(
+                            envelope, client,
+                        )
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["status"] == "started"
+        assert response.payload["mode"] == "agent_loop"
+        assert response.payload["iterations_used"] == 3
+        assert response.payload["run_id"] == "run-bg-123"
 
     @pytest.mark.asyncio
     async def test_agent_loop_denied_returns_denied(

@@ -1,26 +1,24 @@
-"""execute_ssh tool -- wraps execution.run_pipeline.execute_run.
+"""execute_ssh tool -- launches approved SSH commands.
 
 Executes a previously approved SSH command on a remote host. The tool
 enforces the approval constraint: it only runs commands that were
 approved by propose_ssh_command in the same loop session.
 
-Integrated human-approval gate:
-    Before executing the command, execute_ssh sends a confirmation
-    prompt to the user via the IPC confirm_callback and blocks until
-    an explicit "yes" is received. This is a second-level gate:
-    propose_ssh_command handles the initial proposal approval, and
-    execute_ssh handles the final execution confirmation.
+Approval model:
+    propose_ssh_command performs the human approval step and records the
+    approved command in the session ledger. execute_ssh consumes that
+    approval and starts the run.
 
 Delegates to:
-    - jules_daemon.execution.run_pipeline.execute_run
+    - A daemon-provided background launcher when available
+    - Otherwise jules_daemon.execution.run_pipeline.execute_run
 
 Design constraints:
     - execute_ssh can ONLY be called with a command previously approved
       by propose_ssh_command in the same loop session.
     - Requires ApprovalRequirement.CONFIRM_PROMPT.
     - The approval_id from propose_ssh_command must be passed as a parameter.
-    - The confirm_callback blocks until the user explicitly confirms execution.
-    - User denial returns DENIED status (terminal -- agent loop stops).
+    - In daemon runtime the tool usually returns a started run_id immediately.
 
 Usage::
 
@@ -38,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -64,25 +63,22 @@ _STDOUT_CAP: int = 4000
 _STDERR_CAP: int = 2000
 """Maximum bytes of stderr to include in the result."""
 
+BackgroundRunLauncher = Callable[..., Awaitable[dict[str, Any]]]
+"""Async callback that starts a daemon-managed background run."""
+
 
 class ExecuteSSHTool(BaseTool):
-    """Execute a previously approved SSH command with a human confirmation gate.
+    """Execute a previously approved SSH command.
 
-    Two-level approval enforcement:
+    The tool enforces a single approval gate:
         1. The ``approval_id`` must reference a command previously approved
-           by ``propose_ssh_command`` in the same session (ledger check).
-        2. Before execution, the tool sends a confirmation prompt via the
-           ``confirm_callback`` and blocks until the user explicitly confirms.
-           The user can deny or edit the command at this stage.
+           by ``propose_ssh_command`` in the same session.
+        2. The approval is consumed exactly once when execution starts.
 
-    If the user denies execution, the tool returns DENIED status (terminal).
-    If the user confirms, the tool delegates to ``execute_run`` and returns
-    the structured result with stdout, stderr, and exit code.
-
-    Wraps:
-        - execution.run_pipeline.execute_run (full SSH execution pipeline)
-
-    This is a state-changing tool (ApprovalRequirement.CONFIRM_PROMPT).
+    In the daemon runtime, execute_ssh should start a background run and
+    return a run_id quickly so the daemon can monitor it. When no daemon
+    launcher is configured, the tool falls back to the blocking execution
+    pipeline and returns the terminal result directly.
     """
 
     _spec = ToolSpec(
@@ -91,9 +87,10 @@ class ExecuteSSHTool(BaseTool):
             "Execute a previously approved SSH command on the remote host. "
             "You must first use propose_ssh_command to get an approval_id, "
             "then pass that approval_id here. The command and target host "
-            "are retrieved from the approval record. The user will be asked "
-            "to confirm execution before the command runs. Returns the "
-            "execution result including exit code, stdout, and stderr."
+            "are retrieved from the approval record. In the daemon runtime "
+            "this usually starts a background run and returns a run_id right "
+            "away; standalone usage may return the terminal execution result "
+            "including exit code, stdout, and stderr."
         ),
         parameters=(
             ToolParam(
@@ -121,10 +118,12 @@ class ExecuteSSHTool(BaseTool):
         wiki_root: Path,
         ledger: ApprovalLedger,
         confirm_callback: ConfirmCallback,
+        run_launcher: BackgroundRunLauncher | None = None,
     ) -> None:
         self._wiki_root = wiki_root
         self._ledger = ledger
         self._confirm_callback = confirm_callback
+        self._run_launcher = run_launcher
 
     async def execute(self, args: dict[str, Any]) -> ToolResult:
         """Execute the approved SSH command after human confirmation.
@@ -214,8 +213,22 @@ class ExecuteSSHTool(BaseTool):
             consumed.target_host,
         )
 
-        # Step 6: Delegate to the execution pipeline
         try:
+            if self._run_launcher is not None:
+                launch_data = await self._run_launcher(
+                    target_host=consumed.target_host,
+                    target_user=consumed.target_user,
+                    command=command_to_execute,
+                    timeout=int(timeout),
+                )
+                return ToolResult(
+                    call_id=call_id,
+                    tool_name=self.name,
+                    status=ToolResultStatus.SUCCESS,
+                    output=json.dumps(launch_data, default=str),
+                )
+
+            # Step 6: Delegate to the execution pipeline
             from jules_daemon.execution.run_pipeline import execute_run
 
             run_result = await execute_run(

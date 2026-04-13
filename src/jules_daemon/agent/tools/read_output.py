@@ -69,6 +69,7 @@ _MAX_LAST_N = 50
 # Type alias for the session history provider callback.
 # Returns the current conversation history messages as a tuple of dicts.
 SessionHistoryProvider = Callable[[], tuple[dict[str, Any], ...] | None]
+LiveOutputProvider = Callable[[int], dict[str, Any]]
 
 
 class ReadOutputTool(InfoRetrievalTool):
@@ -101,9 +102,11 @@ class ReadOutputTool(InfoRetrievalTool):
         *,
         wiki_root: Path,
         session_history_provider: SessionHistoryProvider | None = None,
+        live_output_provider: LiveOutputProvider | None = None,
     ) -> None:
         self._wiki_root = wiki_root
         self._session_history_provider = session_history_provider
+        self._live_output_provider = live_output_provider
         self._spec_cache: ToolSpec | None = None
 
     # -- Protocol-required properties (InfoRetrievalTool) ------------------
@@ -120,7 +123,9 @@ class ReadOutputTool(InfoRetrievalTool):
             "Read prior command or tool output from the current session. "
             "Use source='wiki' (default) to read the current run's status, "
             "resolved shell command, progress, and error messages from the "
-            "wiki. Use source='session' to review recent tool call results "
+            "wiki. Use source='live' to read the daemon's in-memory tail of "
+            "the active run output when available. Use source='session' to "
+            "review recent tool call results "
             "from earlier think-act cycles in this agent loop session, "
             "which is useful for observing past failures and self-correcting."
         )
@@ -131,12 +136,13 @@ class ReadOutputTool(InfoRetrievalTool):
 
         Parameters:
             source (string, optional): Output source -- 'wiki' for current
-                run state, 'session' for recent tool results. Default: 'wiki'.
+                run state, 'live' for in-memory active-run output tail,
+                'session' for recent tool results. Default: 'wiki'.
             include_connection (boolean, optional): Include SSH connection
                 params in wiki output. Default: false. Ignored for session.
             tool_name_filter (string, optional): When source is 'session',
                 filter results to only this tool name. Ignored for wiki.
-            last_n (integer, optional): When source is 'session', return
+            last_n (integer, optional): When source is 'session' or 'live', return
                 the N most recent tool results. Default: 10. Max: 50.
                 Ignored for wiki.
         """
@@ -147,10 +153,11 @@ class ReadOutputTool(InfoRetrievalTool):
                     "type": "string",
                     "description": (
                         "Output source: 'wiki' for current run state, "
-                        "'session' for recent tool call results from this "
-                        "agent loop session"
+                        "'live' for the daemon's in-memory tail of the active "
+                        "run output, 'session' for recent tool call results "
+                        "from this agent loop session"
                     ),
-                    "enum": ["wiki", "session"],
+                    "enum": ["wiki", "live", "session"],
                     "default": "wiki",
                 },
                 "include_connection": {
@@ -261,6 +268,8 @@ class ReadOutputTool(InfoRetrievalTool):
 
         if source == "session":
             return self._read_session(call_id=call_id, args=args)
+        if source == "live":
+            return self._read_live(call_id=call_id, args=args)
 
         # Default: wiki source
         include_connection = args.get("include_connection", False)
@@ -304,6 +313,31 @@ class ReadOutputTool(InfoRetrievalTool):
             }
 
         return result
+
+    # -- Session source reader ---------------------------------------------
+
+    def _read_live(
+        self, *, call_id: str, args: dict[str, Any]
+    ) -> ToolResult:
+        """Read the daemon's in-memory output tail for the active run."""
+        if self._live_output_provider is None:
+            return ToolResult.error(
+                call_id=call_id,
+                tool_name=self.name,
+                error_message=(
+                    "Live output is not available. The read_output tool "
+                    "was not configured with a live_output_provider."
+                ),
+            )
+
+        raw_last_n = args.get("last_n", _DEFAULT_LAST_N)
+        last_n = min(max(int(raw_last_n), 1), _MAX_LAST_N)
+        result_data = self._live_output_provider(last_n)
+        return ToolResult.success(
+            call_id=call_id,
+            tool_name=self.name,
+            output=json.dumps(result_data, default=str),
+        )
 
     # -- Session source reader ---------------------------------------------
 

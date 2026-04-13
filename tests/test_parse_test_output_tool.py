@@ -85,6 +85,12 @@ class TestToolSpec:
         param_names = [p.name for p in tool.spec.parameters]
         assert "framework_hint" in param_names
 
+    def test_tool_has_summary_fields_param(
+        self, tool: ParseTestOutputTool
+    ) -> None:
+        param_names = [p.name for p in tool.spec.parameters]
+        assert "summary_fields" in param_names
+
     def test_framework_hint_includes_jest(self, tool: ParseTestOutputTool) -> None:
         for p in tool.spec.parameters:
             if p.name == "framework_hint":
@@ -628,6 +634,26 @@ class TestOutputStructure:
         assert "framework" in data
         assert "summary" in data
 
+    def test_focused_summary_added_when_summary_fields_requested(
+        self, tool: ParseTestOutputTool
+    ) -> None:
+        result = run_async(tool.execute({
+            "raw_output": "tests/test_x.py::test_a PASSED\n",
+            "summary_fields": ["failed", "passed", "iterations_done"],
+            "_call_id": "s1b",
+        }))
+        data = json.loads(result.output)
+        assert data["summary_fields"] == [
+            "failed",
+            "passed",
+            "iterations_done",
+        ]
+        assert data["focused_summary"] == {
+            "failed": 0,
+            "passed": 1,
+        }
+        assert data["unmapped_summary_fields"] == ["iterations_done"]
+
     def test_summary_has_all_counts(self, tool: ParseTestOutputTool) -> None:
         result = run_async(tool.execute({
             "raw_output": "tests/test_x.py::test_a PASSED\n",
@@ -695,6 +721,17 @@ class TestErrorHandling:
         }))
         assert result.tool_name == "parse_test_output"
 
+    def test_invalid_summary_fields_returns_error(
+        self, tool: ParseTestOutputTool
+    ) -> None:
+        result = run_async(tool.execute({
+            "raw_output": "tests/test_x.py::test_a PASSED\n",
+            "summary_fields": "passed,failed",
+            "_call_id": "e4",
+        }))
+        assert result.status == ToolResultStatus.ERROR
+        assert "summary_fields must be an array" in (result.error_message or "")
+
 
 # ---------------------------------------------------------------------------
 # OpenAI schema serialization
@@ -713,6 +750,7 @@ class TestOpenAISchema:
         assert params["type"] == "object"
         assert "raw_output" in params["properties"]
         assert "framework_hint" in params["properties"]
+        assert "summary_fields" in params["properties"]
 
 
 # ---------------------------------------------------------------------------

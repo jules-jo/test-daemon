@@ -58,6 +58,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -85,7 +86,11 @@ from jules_daemon.execution.output_summarizer import (
     OutputSummary,
     summarize_output,
 )
-from jules_daemon.execution.run_pipeline import RunResult, execute_run
+from jules_daemon.execution.run_pipeline import (
+    DEFAULT_TIMEOUT_SECONDS,
+    RunResult,
+    execute_run,
+)
 from jules_daemon.ipc.framing import (
     HEADER_SIZE,
     MessageEnvelope,
@@ -101,10 +106,37 @@ from jules_daemon.classifier.direct_command import (
 from jules_daemon.ipc.notification_broadcaster import NotificationBroadcaster
 from jules_daemon.ipc.notification_emitter import (
     emit_agent_loop_completion,
+    emit_alert,
     emit_run_completion,
 )
 from jules_daemon.ipc.request_validator import validate_request
 from jules_daemon.ipc.server import ClientConnection
+from jules_daemon.monitor.alert_collector import AlertCollector
+from jules_daemon.monitor.alert_query import AlertQueryService
+from jules_daemon.monitor.anomaly_models import (
+    AnomalySeverity,
+    ErrorKeywordPattern,
+    FailureRatePattern,
+)
+from jules_daemon.monitor.detector_dispatcher import (
+    DetectorDispatcher,
+    DispatchResult,
+)
+from jules_daemon.monitor.detector_registry import DetectorRegistry
+from jules_daemon.monitor.error_keyword_detector import ErrorKeywordDetector
+from jules_daemon.monitor.failure_rate_spike_detector import (
+    FailureRateSpikeDetector,
+)
+from jules_daemon.monitor.output_broadcaster import JobOutputBroadcaster
+from jules_daemon.protocol.notifications import (
+    HeartbeatNotification,
+    NotificationEnvelope as DaemonNotificationEnvelope,
+    NotificationEventType,
+    NotificationSeverity,
+    SubscribeResponse,
+    UnsubscribeResponse,
+    create_notification_envelope,
+)
 from jules_daemon.ssh.credentials import resolve_ssh_credentials
 from jules_daemon.wiki import current_run as current_run_io
 from jules_daemon.wiki.command_queue import CommandQueue
@@ -155,6 +187,47 @@ logger = logging.getLogger(__name__)
 # tail is kept as a fallback for debugging when a parser label is
 # ``"none"``.
 _AUDIT_RAW_TAIL_LIMIT: int = 2_000
+_STATUS_SUMMARY_FIELD_ORDER: tuple[str, ...] = (
+    "passed",
+    "failed",
+    "skipped",
+    "error",
+    "incomplete",
+)
+_STATUS_ALERT_SUMMARY_MAX_RESULTS: int = 3
+_DEFAULT_MONITOR_ERROR_PATTERNS: tuple[ErrorKeywordPattern, ...] = (
+    ErrorKeywordPattern(
+        name="oom",
+        regex=r"\b(?:out of memory|oom)\b",
+        severity=AnomalySeverity.CRITICAL,
+        description="Out-of-memory condition detected in live output.",
+    ),
+    ErrorKeywordPattern(
+        name="segfault",
+        regex=r"\b(?:sigsegv|segmentation fault|core dumped)\b",
+        severity=AnomalySeverity.CRITICAL,
+        description="Segmentation fault detected in live output.",
+    ),
+    ErrorKeywordPattern(
+        name="python_traceback",
+        regex=r"Traceback \\(most recent call last\\):",
+        severity=AnomalySeverity.WARNING,
+        description="Python traceback detected in live output.",
+    ),
+    ErrorKeywordPattern(
+        name="fatal_error",
+        regex=r"\bfatal(?:\s+error)?\b",
+        severity=AnomalySeverity.WARNING,
+        description="Fatal error text detected in live output.",
+    ),
+)
+_DEFAULT_MONITOR_FAILURE_RATE_PATTERN = FailureRatePattern(
+    name="failure_rate_spike",
+    threshold_count=10,
+    window_seconds=30.0,
+    severity=AnomalySeverity.WARNING,
+    description="Failure rate spiking over the last 30 seconds.",
+)
 
 
 def _format_output_summary(*, summary_obj: OutputSummary) -> str:
@@ -191,6 +264,17 @@ def _format_output_summary(*, summary_obj: OutputSummary) -> str:
         for failure in summary_obj.key_failures:
             lines.append(f"  - {failure}")
     return "\n".join(lines)
+
+
+def _notification_severity_for_anomaly(
+    severity: AnomalySeverity,
+) -> NotificationSeverity:
+    """Translate monitor severities to notification severities."""
+    if severity is AnomalySeverity.CRITICAL:
+        return NotificationSeverity.ERROR
+    if severity is AnomalySeverity.WARNING:
+        return NotificationSeverity.WARNING
+    return NotificationSeverity.INFO
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +380,7 @@ class RequestHandlerConfig:
             path even when the agent loop is available. Defaults to
             ``False`` (agent loop is the default for NL commands).
         max_agent_iterations: Hard cap on think-act-observe cycles per
-            agent loop invocation. Defaults to 5.
+            agent loop invocation. Defaults to 15.
         notification_broadcaster: Optional broadcaster for pushing
             completion and alert events to subscribed CLI clients.
             When ``None``, no notification events are emitted (the
@@ -442,6 +526,19 @@ class RequestHandler:
         self._output_buffer: list[str] = []
         self._output_lock = asyncio.Lock()
         self._output_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._job_output_broadcaster = JobOutputBroadcaster()
+        self._alert_collector = AlertCollector()
+        self._alert_query = AlertQueryService(collector=self._alert_collector)
+        self._detector_registry = DetectorRegistry()
+        self._detector_dispatcher = DetectorDispatcher(
+            registry=self._detector_registry
+        )
+        self._started_at_monotonic = time.monotonic()
+        self._notification_tasks: dict[str, asyncio.Task[None]] = {}
+        self._notification_subscription_clients: dict[str, str] = {}
+        self._client_notification_subscriptions: dict[str, set[str]] = {}
+        self._notification_lock = asyncio.Lock()
+        self._heartbeat_task: asyncio.Task[None] | None = None
         # Last failure message, shown to the next CLI that connects
         # after a background run fails. Cleared when displayed.
         self._last_failure: str | None = None
@@ -467,6 +564,7 @@ class RequestHandler:
                 "LLM command translator not configured -- "
                 "natural-language input will be used as-is"
             )
+        self._register_default_monitor_detectors()
 
         self._verb_dispatch: dict[str, _VerbHandler] = {
             "handshake": self._handle_handshake,
@@ -480,6 +578,8 @@ class RequestHandler:
             "run": self._handle_run,
             "watch": self._handle_watch,
             "discover": self._handle_discover,
+            "subscribe_notifications": self._handle_subscribe_notifications,
+            "unsubscribe_notifications": self._handle_unsubscribe_notifications,
         }
 
     # -- Agent loop availability -------------------------------------------------
@@ -609,6 +709,301 @@ class RequestHandler:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None, functools.partial(func, *args)
+        )
+
+    # -- Notification subscription helpers --
+
+    def _notification_stream_envelope(
+        self,
+        notification: DaemonNotificationEnvelope,
+    ) -> MessageEnvelope:
+        """Wrap a daemon notification as a STREAM IPC envelope."""
+        return MessageEnvelope(
+            msg_type=MessageType.STREAM,
+            msg_id=f"notification-{uuid.uuid4().hex[:12]}",
+            timestamp=_now_iso(),
+            payload={
+                "verb": "notification",
+                "notification": notification.model_dump(mode="json"),
+            },
+        )
+
+    async def _queue_depth_for_heartbeat(self) -> int:
+        """Return the best-effort queue depth for heartbeat payloads."""
+        try:
+            return int(await self._run_blocking(self._queue.size))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Heartbeat queue depth lookup failed: %s", exc)
+            return 0
+
+    async def _emit_heartbeat_once(self) -> None:
+        """Broadcast a single heartbeat notification to subscribers."""
+        broadcaster = self._config.notification_broadcaster
+        if broadcaster is None or broadcaster.subscriber_count == 0:
+            return
+
+        payload = HeartbeatNotification(
+            daemon_uptime_seconds=max(
+                0.0, time.monotonic() - self._started_at_monotonic,
+            ),
+            active_run_id=self._current_run_id,
+            queue_depth=await self._queue_depth_for_heartbeat(),
+        )
+        envelope = create_notification_envelope(
+            event_type=NotificationEventType.HEARTBEAT,
+            payload=payload,
+        )
+        await broadcaster.broadcast(envelope)
+
+    async def _ensure_notification_heartbeat_task(self) -> None:
+        """Start the shared heartbeat loop when notification subscribers exist."""
+        broadcaster = self._config.notification_broadcaster
+        if broadcaster is None:
+            return
+        if self._heartbeat_task is not None and not self._heartbeat_task.done():
+            return
+        if broadcaster.subscriber_count == 0:
+            return
+        self._heartbeat_task = asyncio.create_task(
+            self._notification_heartbeat_loop(),
+            name="notification-heartbeat",
+        )
+
+    async def _notification_heartbeat_loop(self) -> None:
+        """Emit periodic heartbeats while at least one subscriber exists."""
+        broadcaster = self._config.notification_broadcaster
+        if broadcaster is None:
+            return
+
+        try:
+            while broadcaster.subscriber_count > 0:
+                await asyncio.sleep(broadcaster.heartbeat_interval_seconds)
+                if broadcaster.subscriber_count == 0:
+                    break
+                try:
+                    await self._emit_heartbeat_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "Notification heartbeat emission failed: %s",
+                        exc,
+                    )
+        except asyncio.CancelledError:
+            logger.debug("Notification heartbeat loop cancelled")
+            raise
+        finally:
+            if self._heartbeat_task is asyncio.current_task():
+                self._heartbeat_task = None
+
+    async def _cleanup_notification_subscription(
+        self,
+        subscription_id: str,
+        *,
+        unsubscribe_broadcaster: bool,
+    ) -> None:
+        """Remove local subscription bookkeeping and stop background tasks."""
+        current_task = asyncio.current_task()
+        task_to_await: asyncio.Task[None] | None = None
+        heartbeat_task: asyncio.Task[None] | None = None
+
+        async with self._notification_lock:
+            task = self._notification_tasks.pop(subscription_id, None)
+            client_id = self._notification_subscription_clients.pop(
+                subscription_id, None,
+            )
+            if client_id is not None:
+                client_subs = self._client_notification_subscriptions.get(
+                    client_id
+                )
+                if client_subs is not None:
+                    client_subs.discard(subscription_id)
+                    if not client_subs:
+                        self._client_notification_subscriptions.pop(
+                            client_id, None,
+                        )
+
+            if (
+                task is not None
+                and task is not current_task
+                and not task.done()
+            ):
+                task.cancel()
+                task_to_await = task
+
+            broadcaster = self._config.notification_broadcaster
+            if (
+                broadcaster is not None
+                and broadcaster.subscriber_count == 0
+                and self._heartbeat_task is not None
+                and self._heartbeat_task is not current_task
+                and not self._heartbeat_task.done()
+            ):
+                self._heartbeat_task.cancel()
+                heartbeat_task = self._heartbeat_task
+
+        broadcaster = self._config.notification_broadcaster
+        if (
+            unsubscribe_broadcaster
+            and broadcaster is not None
+            and broadcaster.has_subscriber(subscription_id)
+        ):
+            await broadcaster.unsubscribe(subscription_id)
+            if (
+                broadcaster.subscriber_count == 0
+                and self._heartbeat_task is not None
+                and self._heartbeat_task is not current_task
+                and not self._heartbeat_task.done()
+            ):
+                self._heartbeat_task.cancel()
+                heartbeat_task = self._heartbeat_task
+
+        if task_to_await is not None:
+            await asyncio.gather(task_to_await, return_exceptions=True)
+        if heartbeat_task is not None:
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+
+    async def _notification_stream_loop(
+        self,
+        *,
+        subscription_id: str,
+        client: ClientConnection,
+    ) -> None:
+        """Forward broadcaster events to a client's STREAM connection."""
+        broadcaster = self._config.notification_broadcaster
+        if broadcaster is None:
+            return
+
+        try:
+            while True:
+                try:
+                    notification = await broadcaster.receive(
+                        subscription_id, timeout=1.0,
+                    )
+                except ValueError:
+                    break
+
+                if notification is None:
+                    continue
+
+                stream_msg = self._notification_stream_envelope(notification)
+                await self._send_envelope(client, stream_msg)
+        except asyncio.CancelledError:
+            logger.debug(
+                "Notification stream cancelled for subscriber %s",
+                subscription_id,
+            )
+            raise
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            logger.debug(
+                "Notification subscriber %s disconnected: %s",
+                subscription_id,
+                exc,
+            )
+        finally:
+            await self._cleanup_notification_subscription(
+                subscription_id,
+                unsubscribe_broadcaster=True,
+            )
+
+    async def _handle_subscribe_notifications(
+        self,
+        msg_id: str,
+        parsed: dict[str, Any],
+        client: ClientConnection,
+    ) -> MessageEnvelope:
+        """Register a persistent notification subscriber for this client."""
+        broadcaster = self._config.notification_broadcaster
+        if broadcaster is None:
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary="Notification subscriptions are disabled",
+                validation_errors=[],
+            )
+
+        event_filter = parsed.get("event_filter")
+        effective_filter = None
+        if event_filter is not None:
+            effective_filter = frozenset({
+                *event_filter,
+                NotificationEventType.HEARTBEAT,
+            })
+
+        handle = await broadcaster.subscribe(event_filter=effective_filter)
+        stream_task = asyncio.create_task(
+            self._notification_stream_loop(
+                subscription_id=handle.subscription_id,
+                client=client,
+            ),
+            name=f"notification-stream-{handle.subscription_id}",
+        )
+
+        async with self._notification_lock:
+            self._notification_tasks[handle.subscription_id] = stream_task
+            self._notification_subscription_clients[handle.subscription_id] = (
+                client.client_id
+            )
+            client_subs = self._client_notification_subscriptions.setdefault(
+                client.client_id, set()
+            )
+            client_subs.add(handle.subscription_id)
+
+        await self._ensure_notification_heartbeat_task()
+
+        payload = SubscribeResponse(
+            subscription_id=handle.subscription_id,
+            heartbeat_interval_seconds=broadcaster.heartbeat_interval_seconds,
+        ).model_dump(mode="json")
+        return MessageEnvelope(
+            msg_type=MessageType.RESPONSE,
+            msg_id=msg_id,
+            timestamp=_now_iso(),
+            payload=payload,
+        )
+
+    async def _handle_unsubscribe_notifications(
+        self,
+        msg_id: str,
+        parsed: dict[str, Any],
+        client: ClientConnection,
+    ) -> MessageEnvelope:
+        """Remove a persistent notification subscription for this client."""
+        subscription_id = parsed.get("subscription_id", "")
+
+        async with self._notification_lock:
+            owner_client_id = self._notification_subscription_clients.get(
+                subscription_id
+            )
+
+        if owner_client_id is None:
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary=(
+                    f"Notification subscription {subscription_id!r} was not found"
+                ),
+                validation_errors=[],
+            )
+
+        if owner_client_id != client.client_id:
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary="Cannot unsubscribe another client's notification stream",
+                validation_errors=[],
+            )
+
+        await self._cleanup_notification_subscription(
+            subscription_id,
+            unsubscribe_broadcaster=True,
+        )
+
+        payload = UnsubscribeResponse(
+            subscription_id=subscription_id,
+        ).model_dump(mode="json")
+        return MessageEnvelope(
+            msg_type=MessageType.RESPONSE,
+            msg_id=msg_id,
+            timestamp=_now_iso(),
+            payload=payload,
         )
 
     # -- LLM translation helper --
@@ -1327,7 +1722,28 @@ class RequestHandler:
         # Build IPC callback bridges
         confirm_cb = make_confirm_callback(client)
         ask_cb = make_ask_callback(client)
-        notify_cb = make_notify_callback(client)
+        notify_cb = make_notify_callback(
+            client,
+            notification_broadcaster=self._config.notification_broadcaster,
+        )
+
+        async def _launch_background_run(
+            *,
+            target_host: str,
+            target_user: str,
+            command: str,
+            timeout: int = DEFAULT_TIMEOUT_SECONDS,
+        ) -> dict[str, Any]:
+            return self._spawn_background_run(
+                target_host=target_host,
+                target_user=target_user,
+                command=command,
+                target_port=target_port,
+                timeout=timeout,
+            )
+
+        def _live_output_provider(last_n: int) -> dict[str, Any]:
+            return self._get_live_output_snapshot(last_n=last_n)
 
         # Build the tool registry with all 10 tools
         llm_model = (
@@ -1343,6 +1759,8 @@ class RequestHandler:
             notify_callback=notify_cb,
             llm_client=self._config.llm_client,
             llm_model=llm_model,
+            run_launcher=_launch_background_run,
+            live_output_provider=_live_output_provider,
         )
 
         registry = ToolRegistry()
@@ -1428,6 +1846,31 @@ class RequestHandler:
 
         # Translate the agent loop result into a response envelope
         if result.final_state is AgentLoopState.COMPLETE:
+            execute_result = self._extract_latest_execute_result(
+                result.history,
+            )
+            if execute_result is not None and (
+                execute_result.get("status") == "started"
+            ):
+                return _build_success_response(
+                    msg_id=msg_id,
+                    verb="run",
+                    extra={
+                        "status": "started",
+                        "mode": "agent_loop",
+                        "iterations_used": result.iterations_used,
+                        "run_id": execute_result.get("run_id"),
+                        "target_host": execute_result.get(
+                            "target_host", target_host,
+                        ),
+                        "command": execute_result.get("command", ""),
+                        "message": execute_result.get(
+                            "message",
+                            "Test started. Use 'status' to check progress.",
+                        ),
+                    },
+                )
+
             # Extract test execution summary from the agent's history
             summary = self._extract_run_summary(result)
             return _build_success_response(
@@ -1478,6 +1921,37 @@ class RequestHandler:
                 validation_errors=[],
             )
 
+    def _extract_latest_execute_result(
+        self,
+        history: tuple[dict[str, Any], ...],
+    ) -> dict[str, Any] | None:
+        """Return the most recent parsed execute_ssh result from history."""
+        import json as _json
+
+        execute_result: dict[str, Any] | None = None
+
+        for msg in history:
+            if msg.get("role") != "tool":
+                continue
+            content = msg.get("content", "")
+            try:
+                data = _json.loads(content) if isinstance(content, str) else {}
+            except (ValueError, TypeError):
+                data = {}
+
+            if not isinstance(data, dict):
+                continue
+
+            tool_name = msg.get("name", "")
+            if (
+                tool_name == "execute_ssh"
+                or "exit_code" in data
+                or data.get("status") == "started"
+            ):
+                execute_result = data
+
+        return execute_result
+
     def _extract_run_summary(self, result: Any) -> str:
         """Extract a user-facing test summary from the agent loop history.
 
@@ -1486,7 +1960,7 @@ class RequestHandler:
         """
         import json as _json
 
-        execute_result = None
+        execute_result = self._extract_latest_execute_result(result.history)
         summarize_result = None
 
         for msg in result.history:
@@ -1498,14 +1972,19 @@ class RequestHandler:
             except (ValueError, TypeError):
                 data = {}
 
-            # Check tool name from the message or infer from content
             tool_name = msg.get("name", "")
-            if tool_name == "execute_ssh" or "exit_code" in data:
-                execute_result = data
-            elif tool_name == "summarize_run" or "narrative" in data:
+            if tool_name == "summarize_run" or "narrative" in data:
                 summarize_result = data
 
         parts: list[str] = []
+
+        if execute_result and execute_result.get("status") == "started":
+            return str(
+                execute_result.get(
+                    "message",
+                    "Test started. Use 'status' to check progress.",
+                ),
+            )
 
         # Use summarize_run result if available (richest summary)
         if summarize_result:
@@ -1601,7 +2080,11 @@ class RequestHandler:
             "Do NOT call propose_ssh_command again for the same command.",
             "Step 6: If the command fails, analyze the error and propose a "
             "corrected command. Do NOT repeat the same failing command.",
-            "Step 7: When done, call summarize_run and stop calling tools.",
+            "Step 7: If execute_ssh returns status='started' with a run_id, "
+            "tell the user the run started and stop calling tools. Do NOT "
+            "call summarize_run yet for a background run. Only call "
+            "summarize_run when you already have terminal output from a "
+            "completed run.",
             "",
             "## Additional Rules",
             "- Use check_remote_processes before proposing if you suspect "
@@ -2191,45 +2674,498 @@ class RequestHandler:
         except Exception:
             pass  # Best effort -- don't fail the run if status send fails
 
-        # Clear the previous completed run -- a new run is starting
-        self._last_completed_run = None
-
-        # Spawn execute_run as a background task. The audit record
-        # carries the NL/parsed/confirmation stages forward into
-        # the background task, which will append the SSH execution
-        # and structured result stages and persist the full chain.
-        self._current_run_id = run_id
-        self._current_task = asyncio.create_task(
-            self._background_execute(
-                target_host=target_host,
-                target_user=target_user,
-                command=proposed_command,
-                target_port=target_port,
-                audit=audit,
-            ),
-            name=f"run-{run_id}",
+        started = self._spawn_background_run(
+            target_host=target_host,
+            target_user=target_user,
+            command=proposed_command,
+            target_port=target_port,
+            run_id=run_id,
+            audit=audit,
         )
 
         # Step 6: Return "started" response immediately
         return _build_success_response(
             msg_id=msg_id,
             verb="run",
-            extra={
-                "status": "started",
-                "run_id": run_id,
-                "target_host": target_host,
-                "command": proposed_command,
-                "message": "Test started. Use 'status' to check progress.",
-            },
+            extra=started,
         )
 
-    async def _background_execute(
+    def _spawn_background_run(
         self,
         *,
         target_host: str,
         target_user: str,
         command: str,
+        target_port: int = 22,
+        timeout: int = DEFAULT_TIMEOUT_SECONDS,
+        run_id: str | None = None,
+        audit: AuditRecord | None = None,
+    ) -> dict[str, Any]:
+        """Start a daemon-managed background run and return its start payload."""
+        current_task = asyncio.current_task()
+        if (
+            self._current_task is not None
+            and not self._current_task.done()
+            and current_task is not self._current_task
+        ):
+            raise RuntimeError(
+                "A run is already active; wait for it to finish before "
+                "starting another one."
+            )
+
+        effective_run_id = run_id or f"run-{uuid.uuid4().hex[:12]}"
+
+        # Clear the previous completed run -- a new run is starting
+        self._last_completed_run = None
+        self._current_run_id = effective_run_id
+        self._prepare_live_run_state(run_id=effective_run_id)
+        self._current_task = asyncio.create_task(
+            self._background_execute(
+                run_id=effective_run_id,
+                target_host=target_host,
+                target_user=target_user,
+                command=command,
+                target_port=target_port,
+                timeout=timeout,
+                audit=audit,
+            ),
+            name=f"run-{effective_run_id}",
+        )
+
+        return {
+            "status": "started",
+            "run_id": effective_run_id,
+            "target_host": target_host,
+            "command": command,
+            "message": "Test started. Use 'status' to check progress.",
+        }
+
+    def _register_default_monitor_detectors(self) -> None:
+        """Install the default detector set for live-run monitoring."""
+        if self._detector_registry.count > 0:
+            return
+
+        self._detector_registry.register(
+            ErrorKeywordDetector(patterns=_DEFAULT_MONITOR_ERROR_PATTERNS)
+        )
+        self._detector_registry.register(
+            FailureRateSpikeDetector(
+                pattern=_DEFAULT_MONITOR_FAILURE_RATE_PATTERN
+            )
+        )
+
+    def _prepare_live_run_state(self, *, run_id: str) -> None:
+        """Reset transient live-run state and register monitor plumbing."""
+        self._output_buffer = []
+        while not self._output_queue.empty():
+            try:
+                self._output_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        self._alert_collector.clear_session(run_id)
+        if self._job_output_broadcaster.is_registered(run_id):
+            self._job_output_broadcaster.unregister_job(run_id)
+        self._job_output_broadcaster.register_job(run_id)
+
+    def _publish_live_output_line(
+        self,
+        run_id: str,
+        line: str,
+        *,
+        dispatch_monitor_alerts: bool = True,
+    ) -> None:
+        """Fan out one live output line to watchers and monitor hooks.
+
+        This must run on the event loop thread. Thread-based SSH callbacks
+        schedule into it via ``loop.call_soon_threadsafe``.
+        """
+        self._output_buffer.append(line)
+        try:
+            self._output_queue.put_nowait(line)
+        except asyncio.QueueFull:
+            pass  # Best effort for legacy watch consumers
+
+        if self._job_output_broadcaster.is_registered(run_id):
+            try:
+                self._job_output_broadcaster.publish(run_id, line)
+            except ValueError:
+                logger.debug(
+                    "Skipped publish for unregistered live run %s", run_id
+                )
+
+        if dispatch_monitor_alerts and self._detector_registry.count > 0:
+            asyncio.create_task(
+                self._process_monitor_output_line(run_id=run_id, line=line)
+            )
+
+    async def _process_monitor_output_line(
+        self,
+        *,
+        run_id: str,
+        line: str,
+    ) -> None:
+        """Dispatch a live line through the monitor detector stack."""
+        try:
+            dispatch_result = await self._detector_dispatcher.dispatch(
+                line,
+                session_id=run_id,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Monitor dispatch failed for run_id=%s: %s",
+                run_id,
+                exc,
+            )
+            return
+
+        if dispatch_result.has_errors:
+            logger.warning(
+                "Monitor dispatch reported %d detector error(s) for run_id=%s",
+                len(dispatch_result.errors),
+                run_id,
+            )
+
+        active_patterns = frozenset(
+            alert.pattern_name
+            for alert in self._alert_collector.active_alerts(
+                session_id=run_id,
+            )
+        )
+        fresh_reports = tuple(
+            report
+            for report in dispatch_result.reports
+            if report.pattern_name not in active_patterns
+        )
+        if len(fresh_reports) != len(dispatch_result.reports):
+            dispatch_result = DispatchResult(
+                output_line=dispatch_result.output_line,
+                session_id=dispatch_result.session_id,
+                reports=fresh_reports,
+                errors=dispatch_result.errors,
+                dispatched_at=dispatch_result.dispatched_at,
+            )
+
+        collect_result = self._alert_collector.collect(dispatch_result)
+        if not collect_result.new_alerts:
+            return
+
+        for alert in collect_result.new_alerts:
+            if (
+                alert.severity.numeric_level
+                < AnomalySeverity.WARNING.numeric_level
+            ):
+                continue
+
+            details: dict[str, Any] = {
+                "alert_id": alert.alert_id,
+                "pattern_name": alert.pattern_name,
+                "pattern_type": alert.pattern_type.value,
+                "session_id": alert.session_id,
+                "source": "monitor",
+            }
+            if isinstance(alert.anomaly_report.context, dict):
+                details.update(alert.anomaly_report.context)
+
+            try:
+                await emit_alert(
+                    broadcaster=self._config.notification_broadcaster,
+                    severity=_notification_severity_for_anomaly(
+                        alert.severity
+                    ),
+                    title=f"Monitor alert: {alert.pattern_name}",
+                    message=alert.anomaly_report.message,
+                    run_id=run_id,
+                    details=details,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "Failed to emit monitor alert for run_id=%s: %s",
+                    run_id,
+                    exc,
+                )
+
+    def _build_status_alert_enrichment(
+        self,
+        *,
+        run_id: str | None,
+    ) -> dict[str, Any]:
+        """Attach collected monitor alerts to a status response."""
+        if not run_id:
+            return {}
+
+        summary = self._alert_query.session_alert_summary(
+            run_id,
+            max_priority_alerts=_STATUS_ALERT_SUMMARY_MAX_RESULTS,
+        )
+        if int(summary.get("total_alerts", 0)) <= 0:
+            return {}
+
+        return {"alert_summary": summary}
+
+    def _get_live_output_snapshot(self, *, last_n: int = 10) -> dict[str, Any]:
+        """Return a bounded snapshot of the in-memory output buffer."""
+        bounded_last_n = min(max(int(last_n), 1), 50)
+        task_running = (
+            self._current_task is not None and not self._current_task.done()
+        )
+        if (
+            self._current_run_id is not None
+            and self._job_output_broadcaster.is_registered(
+                self._current_run_id
+            )
+        ):
+            buffered_lines = [
+                output_line.line
+                for output_line in self._job_output_broadcaster.get_buffer(
+                    self._current_run_id
+                )
+            ]
+        else:
+            buffered_lines = list(self._output_buffer)
+
+        snapshot = buffered_lines[-bounded_last_n:]
+        last_output_line = ""
+        if snapshot:
+            last_output_line = snapshot[-1].rstrip("\n")
+
+        if task_running:
+            status = "running"
+        elif snapshot:
+            status = "buffered_output"
+        else:
+            status = "no_active_run"
+
+        return {
+            "source": "live",
+            "status": status,
+            "run_id": self._current_run_id,
+            "task_running": task_running,
+            "last_n": bounded_last_n,
+            "returned_count": len(snapshot),
+            "total_buffered_lines": len(buffered_lines),
+            "last_output_line": last_output_line,
+            "lines": snapshot,
+        }
+
+    def _build_status_test_context(
+        self, *, command: str,
+    ) -> dict[str, Any] | None:
+        """Load durable wiki knowledge relevant to a status response."""
+        if not command or not command.strip():
+            return None
+
+        test_slug, knowledge = self._safe_load_test_knowledge(command=command)
+        if knowledge is None:
+            return None
+
+        context: dict[str, Any] = {
+            "test_slug": test_slug,
+            "runs_observed": knowledge.runs_observed,
+        }
+        if knowledge.purpose:
+            context["purpose"] = knowledge.purpose
+        if knowledge.output_format:
+            context["output_format"] = knowledge.output_format
+        if knowledge.summary_fields:
+            context["summary_fields"] = list(knowledge.summary_fields)
+        if knowledge.normal_behavior:
+            context["normal_behavior"] = knowledge.normal_behavior
+        if knowledge.required_args:
+            context["required_args"] = list(knowledge.required_args)
+        if knowledge.common_failures:
+            context["common_failures"] = list(knowledge.common_failures[:3])
+        return context
+
+    def _parse_status_output_snapshot(
+        self,
+        *,
+        raw_output: str,
+        summary_fields: tuple[str, ...] = (),
+    ) -> dict[str, Any] | None:
+        """Best-effort parse of active or completed test output."""
+        if not raw_output or not raw_output.strip():
+            return None
+
+        try:
+            from jules_daemon.monitor.test_output_parser import (
+                FrameworkHint,
+                OutputContext,
+                TestStatus,
+                parse_interrupted_output,
+            )
+
+            parse_result = parse_interrupted_output(
+                raw_output,
+                context=OutputContext(framework_hint=FrameworkHint.AUTO),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Status output parse failed: %s", exc)
+            return None
+
+        if (
+            not parse_result.records
+            and parse_result.framework_hint is FrameworkHint.UNKNOWN
+        ):
+            return None
+
+        def _record_name(record: Any) -> str:
+            if getattr(record, "module", ""):
+                return f"{record.module}::{record.name}"
+            return str(record.name)
+
+        failing_tests = [
+            _record_name(record)
+            for record in parse_result.records
+            if record.status in (TestStatus.FAILED, TestStatus.ERROR)
+        ][:3]
+        incomplete_tests = [
+            _record_name(record)
+            for record in parse_result.records
+            if record.status is TestStatus.INCOMPLETE
+        ][:3]
+
+        summary = {
+            "passed": parse_result.passed_count,
+            "failed": parse_result.failed_count,
+            "skipped": parse_result.skipped_count,
+            "error": parse_result.error_count,
+            "incomplete": parse_result.incomplete_count,
+        }
+        parsed_output: dict[str, Any] = {
+            "framework": parse_result.framework_hint.value,
+            "summary": summary,
+        }
+        if summary_fields:
+            focused_summary: dict[str, int] = {}
+            unmapped_summary_fields: list[str] = []
+            seen: set[str] = set()
+            for field in summary_fields:
+                if field in seen:
+                    continue
+                seen.add(field)
+                if field in _STATUS_SUMMARY_FIELD_ORDER:
+                    focused_summary[field] = int(summary.get(field, 0) or 0)
+                else:
+                    unmapped_summary_fields.append(field)
+            if focused_summary:
+                parsed_output["focused_summary"] = focused_summary
+            if unmapped_summary_fields:
+                parsed_output["unmapped_summary_fields"] = (
+                    unmapped_summary_fields
+                )
+        if failing_tests:
+            parsed_output["failing_tests"] = failing_tests
+        if incomplete_tests:
+            parsed_output["incomplete_tests"] = incomplete_tests
+        return parsed_output
+
+    def _format_status_summary(
+        self,
+        *,
+        parsed_output: dict[str, Any],
+        active: bool,
+        summary_fields: tuple[str, ...] = (),
+    ) -> str | None:
+        """Build a short human-readable status summary from parsed output."""
+        summary = parsed_output.get("summary", {})
+        preferred_fields: list[str] = []
+        seen_fields: set[str] = set()
+        for field in summary_fields:
+            if field in _STATUS_SUMMARY_FIELD_ORDER and field not in seen_fields:
+                preferred_fields.append(field)
+                seen_fields.add(field)
+
+        counts: list[str] = []
+        include_requested_zero_counts = any(
+            int(summary.get(field, 0) or 0) > 0 for field in preferred_fields
+        )
+        for field in preferred_fields:
+            value = int(summary.get(field, 0) or 0)
+            if value > 0 or include_requested_zero_counts:
+                counts.append(f"{value} {field}")
+
+        for key in _STATUS_SUMMARY_FIELD_ORDER:
+            if key in seen_fields:
+                continue
+            value = int(summary.get(key, 0) or 0)
+            if value > 0:
+                counts.append(f"{value} {key}")
+
+        if not counts:
+            return None
+
+        framework = str(parsed_output.get("framework", "test_output"))
+        headline = (
+            f"{framework} so far: {', '.join(counts)}"
+            if active
+            else f"{framework} summary: {', '.join(counts)}"
+        )
+
+        trailing: list[str] = []
+        failing_tests = parsed_output.get("failing_tests") or []
+        incomplete_tests = parsed_output.get("incomplete_tests") or []
+        if failing_tests:
+            trailing.append(
+                "failing: " + ", ".join(str(name) for name in failing_tests)
+            )
+        if incomplete_tests:
+            trailing.append(
+                "incomplete: "
+                + ", ".join(str(name) for name in incomplete_tests)
+            )
+
+        return (
+            headline if not trailing else headline + " | " + " | ".join(trailing)
+        )
+
+    def _build_status_enrichment(
+        self,
+        *,
+        command: str,
+        raw_output: str,
+        active: bool,
+    ) -> dict[str, Any]:
+        """Attach best-effort test context and parsed output to status."""
+        enrichment: dict[str, Any] = {}
+
+        test_context = self._build_status_test_context(command=command)
+        summary_fields: tuple[str, ...] = ()
+        if test_context is not None:
+            enrichment["test_context"] = test_context
+            raw_summary_fields = test_context.get("summary_fields")
+            if isinstance(raw_summary_fields, list):
+                summary_fields = tuple(
+                    field
+                    for field in raw_summary_fields
+                    if isinstance(field, str) and field.strip()
+                )
+
+        parsed_output = self._parse_status_output_snapshot(
+            raw_output=raw_output,
+            summary_fields=summary_fields,
+        )
+        if parsed_output is not None:
+            enrichment["parsed_output"] = parsed_output
+            status_summary = self._format_status_summary(
+                parsed_output=parsed_output,
+                active=active,
+                summary_fields=summary_fields,
+            )
+            if status_summary:
+                enrichment["status_summary"] = status_summary
+
+        return enrichment
+
+    async def _background_execute(
+        self,
+        *,
+        run_id: str,
+        target_host: str,
+        target_user: str,
+        command: str,
         target_port: int,
+        timeout: int = DEFAULT_TIMEOUT_SECONDS,
         audit: AuditRecord | None = None,
     ) -> RunResult:
         """Run execute_run in the background, handling exceptions gracefully.
@@ -2260,27 +3196,17 @@ class RequestHandler:
         Returns:
             RunResult from the execution pipeline.
         """
-        # Clear output buffer for the new run
-        async with self._output_lock:
-            self._output_buffer = []
-        # Drain any stale items from the output queue
-        while not self._output_queue.empty():
-            try:
-                self._output_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+        loop = asyncio.get_running_loop()
 
         def _on_output(line: str) -> None:
-            """Thread-safe callback for streaming output lines.
-
-            Appends to the shared buffer and puts into the asyncio queue
-            for any active watch subscribers.
-            """
-            self._output_buffer.append(line)
-            try:
-                self._output_queue.put_nowait(line)
-            except asyncio.QueueFull:
-                pass  # Best effort for watch consumers
+            """Bridge thread-based SSH output back onto the event loop."""
+            loop.call_soon_threadsafe(
+                functools.partial(
+                    self._publish_live_output_line,
+                    run_id,
+                    line,
+                )
+            )
 
         try:
             result = await execute_run(
@@ -2289,8 +3215,11 @@ class RequestHandler:
                 command=command,
                 target_port=target_port,
                 wiki_root=self._config.wiki_root,
+                timeout=timeout,
                 on_output=_on_output,
+                run_id=run_id,
             )
+            await asyncio.sleep(0)
             # Set _last_completed_run IMMEDIATELY after execute_run
             # returns to avoid a race window where status sees no active
             # run state. The audit/summary work below can take a few
@@ -2317,10 +3246,11 @@ class RequestHandler:
                     error_summary += f"Error: {result.error}\n"
                 if result.stderr:
                     error_summary += f"Stderr:\n{result.stderr[:1000]}\n"
-                try:
-                    self._output_queue.put_nowait(error_summary)
-                except asyncio.QueueFull:
-                    pass
+                self._publish_live_output_line(
+                    run_id,
+                    error_summary,
+                    dispatch_monitor_alerts=False,
+                )
                 # Persist the last failure so the CLI sees it on reconnect
                 self._last_failure = error_summary
                 logger.warning(
@@ -2347,6 +3277,7 @@ class RequestHandler:
 
                 failed_run = CurrentRun(
                     status=RunStatus.FAILED,
+                    run_id=run_id,
                     ssh_target=SSHTarget(
                         host=target_host,
                         user=target_user,
@@ -2369,7 +3300,7 @@ class RequestHandler:
             # Build a failed result rather than propagating the exception
             result = RunResult(
                 success=False,
-                run_id=self._current_run_id or "",
+                run_id=run_id,
                 command=command,
                 target_host=target_host,
                 target_user=target_user,
@@ -2424,6 +3355,8 @@ class RequestHandler:
                 result.run_id,
                 notify_exc,
             )
+
+        self._job_output_broadcaster.unregister_job(run_id)
 
         # Signal end-of-stream to any watch subscribers
         try:
@@ -2762,14 +3695,12 @@ class RequestHandler:
         # Clear the previous completed run -- a new run is starting
         self._last_completed_run = None
 
-        run_id = f"run-{uuid.uuid4().hex[:12]}"
-        self._current_run_id = run_id
-
         # Seed a partial audit record for the queued run. The user
         # already gave explicit consent when they queued the command,
         # so we record an APPROVED confirmation with a synthetic
         # approver identity so readers can distinguish queued auto-
         # starts from interactive confirmations.
+        run_id = f"run-{uuid.uuid4().hex[:12]}"
         queued_audit: AuditRecord | None = None
         try:
             queued_audit = self._build_queued_audit(
@@ -2783,15 +3714,13 @@ class RequestHandler:
                 exc,
             )
 
-        self._current_task = asyncio.create_task(
-            self._background_execute(
-                target_host=next_cmd.ssh_host or "",
-                target_user=next_cmd.ssh_user or "",
-                command=next_cmd.natural_language,
-                target_port=next_cmd.ssh_port,
-                audit=queued_audit,
-            ),
-            name=f"run-{run_id}",
+        self._spawn_background_run(
+            target_host=next_cmd.ssh_host or "",
+            target_user=next_cmd.ssh_user or "",
+            command=next_cmd.natural_language,
+            target_port=next_cmd.ssh_port,
+            run_id=run_id,
+            audit=queued_audit,
         )
 
     def _build_queued_audit(
@@ -2926,6 +3855,21 @@ class RequestHandler:
                 extra["error"] = last.error
             if last.stderr:
                 extra["stderr"] = last.stderr[:2000]
+            combined_output = (
+                last.stdout
+                if not last.stderr
+                else last.stdout + "\n" + last.stderr
+            )
+            extra.update(
+                self._build_status_enrichment(
+                    command=last.command,
+                    raw_output=combined_output,
+                    active=False,
+                ),
+            )
+            extra.update(
+                self._build_status_alert_enrichment(run_id=last.run_id)
+            )
             return _build_success_response(
                 msg_id=msg_id,
                 verb="status",
@@ -2981,6 +3925,7 @@ class RequestHandler:
             wiki_run = None
 
         if wiki_run is not None and wiki_run.is_active:
+            live_snapshot = self._get_live_output_snapshot(last_n=5)
             # Compute duration so far
             duration_seconds: float | None = None
             if wiki_run.started_at is not None:
@@ -3014,6 +3959,30 @@ class RequestHandler:
             }
             if duration_seconds is not None:
                 extra["duration_seconds"] = round(duration_seconds, 2)
+            if live_snapshot["returned_count"] > 0:
+                extra["last_output_line"] = live_snapshot["last_output_line"]
+                extra["recent_output_lines"] = live_snapshot["lines"]
+                raw_output = "".join(str(line) for line in live_snapshot["lines"])
+            elif wiki_run.progress.last_output_line:
+                extra["last_output_line"] = wiki_run.progress.last_output_line
+                raw_output = wiki_run.progress.last_output_line
+            else:
+                raw_output = ""
+
+            extra.update(
+                self._build_status_enrichment(
+                    command=(
+                        wiki_run.command.resolved_shell
+                        if wiki_run.command is not None
+                        else ""
+                    ),
+                    raw_output=raw_output,
+                    active=True,
+                ),
+            )
+            extra.update(
+                self._build_status_alert_enrichment(run_id=wiki_run.run_id)
+            )
 
             return _build_success_response(
                 msg_id=msg_id,
@@ -3051,6 +4020,20 @@ class RequestHandler:
                 extra["duration_seconds"] = round(duration_seconds, 2)
             if wiki_run.error is not None:
                 extra["error"] = wiki_run.error
+            extra.update(
+                self._build_status_enrichment(
+                    command=(
+                        wiki_run.command.resolved_shell
+                        if wiki_run.command is not None
+                        else ""
+                    ),
+                    raw_output=wiki_run.progress.last_output_line,
+                    active=False,
+                ),
+            )
+            extra.update(
+                self._build_status_alert_enrichment(run_id=wiki_run.run_id)
+            )
 
             return _build_success_response(
                 msg_id=msg_id,
@@ -3100,6 +4083,70 @@ class RequestHandler:
                 extra={
                     "status": "no_active_run",
                     "message": "No test is currently running and no output is buffered",
+                },
+            )
+
+        run_id = self._current_run_id
+        if (
+            task_running
+            and run_id is not None
+            and self._job_output_broadcaster.is_registered(run_id)
+        ):
+            handle = self._job_output_broadcaster.subscribe(run_id)
+            await self._job_output_broadcaster.replay_buffer(handle)
+            seen_sequences: set[int] = set()
+            sent_count = 0
+
+            try:
+                while True:
+                    output_line = await self._job_output_broadcaster.receive(
+                        handle,
+                        timeout=5.0,
+                    )
+                    if output_line is None:
+                        if not self._job_output_broadcaster.is_registered(
+                            run_id
+                        ):
+                            break
+                        continue
+
+                    if output_line.is_end:
+                        break
+                    if output_line.sequence in seen_sequences:
+                        continue
+                    seen_sequences.add(output_line.sequence)
+
+                    sent_count += 1
+                    stream_msg = MessageEnvelope(
+                        msg_type=MessageType.STREAM,
+                        msg_id=f"watch-{uuid.uuid4().hex[:12]}",
+                        timestamp=_now_iso(),
+                        payload={"line": output_line.line, "is_end": False},
+                    )
+                    try:
+                        await self._send_envelope(client, stream_msg)
+                    except Exception:
+                        break
+            finally:
+                self._job_output_broadcaster.unsubscribe(handle)
+
+            end_msg = MessageEnvelope(
+                msg_type=MessageType.STREAM,
+                msg_id=f"watch-end-{uuid.uuid4().hex[:12]}",
+                timestamp=_now_iso(),
+                payload={"line": "", "is_end": True},
+            )
+            try:
+                await self._send_envelope(client, end_msg)
+            except Exception:
+                pass
+
+            return _build_success_response(
+                msg_id=msg_id,
+                verb="watch",
+                extra={
+                    "status": "completed",
+                    "lines_sent": sent_count,
                 },
             )
 

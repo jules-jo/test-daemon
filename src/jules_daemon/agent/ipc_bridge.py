@@ -40,6 +40,7 @@ from jules_daemon.ipc.framing import (
 )
 
 if TYPE_CHECKING:
+    from jules_daemon.ipc.notification_broadcaster import NotificationBroadcaster
     from jules_daemon.ipc.server import ClientConnection
 
 __all__ = [
@@ -247,6 +248,8 @@ def make_ask_callback(
 
 def make_notify_callback(
     client: ClientConnection,
+    *,
+    notification_broadcaster: NotificationBroadcaster | None = None,
 ) -> object:
     """Create an async notify callback bound to a client connection.
 
@@ -255,8 +258,10 @@ def make_notify_callback(
 
         async (message: str, severity: str) -> bool
 
-    The callback sends a STREAM message to the CLI. Failures are
-    silently caught (best-effort delivery).
+    The callback prefers the daemon's notification broadcaster when one
+    is available so subscribed CLIs receive a persistent push event.
+    When no broadcaster-backed subscribers exist, it falls back to a
+    best-effort direct STREAM message to the active client.
 
     Args:
         client: The IPC client connection for the active session.
@@ -266,6 +271,38 @@ def make_notify_callback(
     """
 
     async def _notify(message: str, severity: str = "info") -> bool:
+        if (
+            notification_broadcaster is not None
+            and notification_broadcaster.subscriber_count > 0
+        ):
+            from jules_daemon.protocol.notifications import (
+                AlertNotification,
+                NotificationEventType,
+                NotificationSeverity,
+                create_notification_envelope,
+            )
+
+            try:
+                severity_enum = NotificationSeverity(severity)
+            except ValueError:
+                severity_enum = NotificationSeverity.INFO
+
+            notification = create_notification_envelope(
+                event_type=NotificationEventType.ALERT,
+                payload=AlertNotification(
+                    severity=severity_enum,
+                    title="Agent notification",
+                    message=message,
+                    details={"source": "notify_user"},
+                ),
+            )
+            try:
+                result = await notification_broadcaster.broadcast(notification)
+                if result.delivered_count > 0:
+                    return True
+            except Exception as exc:
+                logger.debug("Failed to broadcast notification: %s", exc)
+
         notify_msg = MessageEnvelope(
             msg_type=MessageType.STREAM,
             msg_id=f"notify-{uuid.uuid4().hex[:12]}",

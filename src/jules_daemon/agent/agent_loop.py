@@ -6,7 +6,7 @@ propose corrections. The loop orchestrates the THINKING -> ACTING ->
 OBSERVING cycle until a termination condition is met.
 
 Termination conditions (OR-composed):
-    - Max iterations reached (configurable, default 5)
+    - Max iterations reached (configurable, default 15)
     - LLM returns no tool calls (natural completion)
     - User cancels / denies an approval-required tool call
     - Permanent error (malformed LLM response, auth failure)

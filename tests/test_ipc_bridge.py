@@ -4,7 +4,7 @@ Validates that the bridge callbacks correctly translate between the
 agent tool layer and the IPC CONFIRM_PROMPT/CONFIRM_REPLY protocol:
 - confirm_callback sends CONFIRM_PROMPT, reads CONFIRM_REPLY
 - ask_callback sends question prompt, reads text reply
-- notify_callback sends STREAM message (best-effort)
+- notify_callback prefers broadcaster delivery and falls back to STREAM
 """
 
 from __future__ import annotations
@@ -26,7 +26,9 @@ from jules_daemon.ipc.framing import (
     MessageType,
     encode_frame,
 )
+from jules_daemon.ipc.notification_broadcaster import NotificationBroadcaster
 from jules_daemon.ipc.server import ClientConnection
+from jules_daemon.protocol.notifications import NotificationEventType
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +215,33 @@ class TestMakeAskCallback:
 
 class TestMakeNotifyCallback:
     """Tests for the notify callback factory."""
+
+    @pytest.mark.asyncio
+    async def test_prefers_broadcaster_delivery(self) -> None:
+        client = _make_client()
+        broadcaster = NotificationBroadcaster()
+        handle = await broadcaster.subscribe(
+            event_filter=frozenset({NotificationEventType.ALERT}),
+        )
+
+        callback = make_notify_callback(
+            client,
+            notification_broadcaster=broadcaster,
+        )
+        result = await callback("Test completed", "success")
+
+        assert result is True
+        assert client.writer.write.call_count == 0
+
+        notification = await broadcaster.receive(
+            handle.subscription_id,
+            timeout=0.1,
+        )
+        assert notification is not None
+        assert notification.event_type is NotificationEventType.ALERT
+        assert notification.payload.message == "Test completed"
+
+        await broadcaster.unsubscribe(handle.subscription_id)
 
     @pytest.mark.asyncio
     async def test_sends_stream_message(self) -> None:

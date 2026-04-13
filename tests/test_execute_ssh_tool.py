@@ -144,12 +144,14 @@ def _make_tool(
     wiki_root: Path,
     ledger: ApprovalLedger,
     confirm_callback: AsyncMock,
+    run_launcher: AsyncMock | None = None,
 ) -> ExecuteSSHTool:
     """Construct an ExecuteSSHTool with the given dependencies."""
     return ExecuteSSHTool(
         wiki_root=wiki_root,
         ledger=ledger,
         confirm_callback=confirm_callback,
+        run_launcher=run_launcher,
     )
 
 
@@ -728,6 +730,48 @@ class TestExecutionDelegation:
             wiki_root=wiki_root,
             timeout=600,
         )
+
+    @pytest.mark.asyncio
+    async def test_run_launcher_starts_background_run_when_injected(
+        self,
+        wiki_root: Path,
+        ledger: ApprovalLedger,
+        sample_entry: ApprovalEntry,
+        confirm_approve: AsyncMock,
+    ) -> None:
+        """Injected launcher should return a started payload without blocking."""
+        ledger.record_approval(sample_entry)
+        run_launcher = AsyncMock(return_value={
+            "status": "started",
+            "run_id": "run-bg-001",
+            "target_host": sample_entry.target_host,
+            "command": sample_entry.command,
+            "message": "Test started. Use 'status' to check progress.",
+        })
+        tool = _make_tool(
+            wiki_root,
+            ledger,
+            confirm_approve,
+            run_launcher=run_launcher,
+        )
+
+        result = await tool.execute({
+            "approval_id": sample_entry.approval_id,
+            "timeout": 123,
+            "_call_id": "exec-bg-1",
+        })
+
+        assert result.status is ToolResultStatus.SUCCESS
+        data = json.loads(result.output)
+        assert data["status"] == "started"
+        assert data["run_id"] == "run-bg-001"
+        run_launcher.assert_awaited_once_with(
+            target_host=sample_entry.target_host,
+            target_user=sample_entry.target_user,
+            command=sample_entry.command,
+            timeout=123,
+        )
+        assert ledger.pending_count == 0
 
     @pytest.mark.asyncio
     async def test_default_timeout_is_3600(

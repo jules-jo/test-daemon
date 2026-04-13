@@ -234,7 +234,19 @@ class TestValidateRequestVerb:
         assert result.is_valid is False
         assert any(e.code == "invalid_verb" for e in result.errors)
 
-    @pytest.mark.parametrize("verb", ["status", "watch", "run", "queue", "cancel", "history"])
+    @pytest.mark.parametrize(
+        "verb",
+        [
+            "status",
+            "watch",
+            "run",
+            "queue",
+            "cancel",
+            "history",
+            "subscribe_notifications",
+            "unsubscribe_notifications",
+        ],
+    )
     def test_all_valid_verbs_accepted(self, verb: str) -> None:
         payload: dict = {"verb": verb}
         if verb in ("run", "queue"):
@@ -243,6 +255,8 @@ class TestValidateRequestVerb:
                 "target_user": "deploy",
                 "natural_language": "run the tests",
             })
+        elif verb == "unsubscribe_notifications":
+            payload["subscription_id"] = "nsub-123"
         envelope = _make_envelope(payload=payload)
         result = validate_request(envelope)
         assert result.is_valid is True, f"verb {verb!r} should be valid: {result.errors}"
@@ -259,6 +273,46 @@ class TestValidateRequestVerb:
         result = validate_request(envelope)
         assert result.is_valid is True
         assert result.verb == "status"
+
+
+class TestValidateRequestNotificationSubscriptionFields:
+    """Tests for notification subscribe/unsubscribe validation."""
+
+    def test_subscribe_event_filter_parsed(self) -> None:
+        envelope = _make_envelope(payload={
+            "verb": "subscribe_notifications",
+            "event_filter": ["completion", "ALERT"],
+        })
+        result = validate_request(envelope)
+        assert result.is_valid is True
+        assert len(result.parsed_payload["event_filter"]) == 2
+
+    def test_subscribe_invalid_event_filter_type(self) -> None:
+        envelope = _make_envelope(payload={
+            "verb": "subscribe_notifications",
+            "event_filter": "completion",
+        })
+        result = validate_request(envelope)
+        assert result.is_valid is False
+        assert any(e.field == "event_filter" for e in result.errors)
+
+    def test_subscribe_invalid_event_filter_value(self) -> None:
+        envelope = _make_envelope(payload={
+            "verb": "subscribe_notifications",
+            "event_filter": ["completion", "telepathy"],
+        })
+        result = validate_request(envelope)
+        assert result.is_valid is False
+        assert any(e.field == "event_filter[1]" for e in result.errors)
+
+    def test_unsubscribe_requires_subscription_id(self) -> None:
+        envelope = _make_envelope(payload={
+            "verb": "unsubscribe_notifications",
+        })
+        result = validate_request(envelope)
+        assert result.is_valid is False
+        assert any(e.field == "subscription_id" for e in result.errors)
+        assert result.verb == "unsubscribe_notifications"
 
 
 # ---------------------------------------------------------------------------

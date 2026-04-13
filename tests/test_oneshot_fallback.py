@@ -914,7 +914,13 @@ class TestHandlerInitBackwardCompat:
         handler = RequestHandler(config=config)
 
         expected_sync = {"handshake", "queue", "status", "cancel", "history"}
-        expected_async = {"run", "watch", "discover"}
+        expected_async = {
+            "run",
+            "watch",
+            "discover",
+            "subscribe_notifications",
+            "unsubscribe_notifications",
+        }
 
         assert set(handler._verb_dispatch.keys()) == expected_sync
         assert set(handler._async_client_dispatch.keys()) == expected_async

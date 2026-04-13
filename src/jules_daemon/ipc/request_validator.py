@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from jules_daemon.ipc.framing import MessageEnvelope, MessageType
+from jules_daemon.protocol.notifications import parse_notification_event_type
 
 __all__ = [
     "ValidationError",
@@ -49,7 +50,7 @@ __all__ = [
 
 _VALID_VERBS: frozenset[str] = frozenset({
     "status", "watch", "run", "queue", "cancel", "history", "handshake",
-    "discover",
+    "discover", "subscribe_notifications", "unsubscribe_notifications",
 })
 
 # Valid output formats for the watch verb
@@ -667,6 +668,62 @@ def _validate_discover_fields(
     return parsed
 
 
+def _validate_subscribe_notification_fields(
+    payload: dict[str, Any],
+    errors: list[ValidationError],
+) -> dict[str, Any]:
+    """Validate subscribe_notifications optional fields."""
+    parsed: dict[str, Any] = {}
+
+    raw_filter = payload.get("event_filter")
+    if raw_filter is None:
+        return parsed
+
+    if not isinstance(raw_filter, (list, tuple)):
+        errors.append(ValidationError(
+            field="event_filter",
+            message="'event_filter' must be a list of notification event types",
+            code="invalid_type",
+        ))
+        return parsed
+
+    event_types = []
+    for index, raw_item in enumerate(raw_filter):
+        field_name = f"event_filter[{index}]"
+        if not isinstance(raw_item, str):
+            errors.append(ValidationError(
+                field=field_name,
+                message=f"'{field_name}' must be a string",
+                code="invalid_type",
+            ))
+            continue
+        try:
+            event_types.append(parse_notification_event_type(raw_item))
+        except ValueError as exc:
+            errors.append(ValidationError(
+                field=field_name,
+                message=str(exc),
+                code="invalid_value",
+            ))
+
+    parsed["event_filter"] = frozenset(event_types)
+    return parsed
+
+
+def _validate_unsubscribe_notification_fields(
+    payload: dict[str, Any],
+    errors: list[ValidationError],
+) -> dict[str, Any]:
+    """Validate unsubscribe_notifications required fields."""
+    parsed: dict[str, Any] = {}
+    subscription_id = _require_non_empty_string(
+        payload, "subscription_id", errors,
+    )
+    if subscription_id is not None:
+        parsed["subscription_id"] = subscription_id
+    return parsed
+
+
 # Type alias for verb-specific field validators
 _VerbValidator = Callable[[dict[str, Any], list[ValidationError]], dict[str, Any]]
 
@@ -679,6 +736,8 @@ _VERB_VALIDATORS: dict[str, _VerbValidator] = {
     "history": _validate_history_fields,
     "status": _validate_status_fields,
     "discover": _validate_discover_fields,
+    "subscribe_notifications": _validate_subscribe_notification_fields,
+    "unsubscribe_notifications": _validate_unsubscribe_notification_fields,
 }
 
 

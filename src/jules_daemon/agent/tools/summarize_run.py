@@ -71,6 +71,13 @@ logger = logging.getLogger(__name__)
 
 # Maximum number of failure highlights to include in the summary.
 _MAX_FAILURE_HIGHLIGHTS: int = 5
+_SUMMARY_FIELD_ORDER: tuple[str, ...] = (
+    "passed",
+    "failed",
+    "skipped",
+    "error",
+    "incomplete",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +259,49 @@ def _generate_next_actions(
     return actions
 
 
+def _coerce_summary_fields(raw_value: Any) -> tuple[str, ...]:
+    """Normalize optional summary field lists from structured inputs."""
+    if raw_value is None:
+        return ()
+    if isinstance(raw_value, str) or not isinstance(raw_value, (list, tuple)):
+        return ()
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in raw_value:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        field = value.strip()
+        if field in seen:
+            continue
+        seen.add(field)
+        normalized.append(field)
+    return tuple(normalized)
+
+
+def _coerce_named_counts(raw_value: Any) -> dict[str, int]:
+    """Normalize an optional mapping of named summary counts."""
+    if not isinstance(raw_value, dict):
+        return {}
+
+    counts: dict[str, int] = {}
+    for key, value in raw_value.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        try:
+            counts[key.strip()] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return counts
+
+
+def _format_count_label(field: str) -> str:
+    """Render count field names for the human-readable summary."""
+    if field == "error":
+        return "errors"
+    return field.replace("_", " ")
+
+
 def _build_summary_text(
     *,
     overall_status: str,
@@ -266,6 +316,7 @@ def _build_summary_text(
     suggested_next_actions: list[str],
     command: str,
     narrative: str,
+    focused_summary: dict[str, int] | None = None,
 ) -> str:
     """Build a human-readable summary text.
 
@@ -285,6 +336,8 @@ def _build_summary_text(
         suggested_next_actions: Recommended actions.
         command: The executed command.
         narrative: Optional LLM-generated narrative.
+        focused_summary: Optional ordered summary subset to prefer for the
+            human-readable count line.
 
     Returns:
         Multi-line human-readable summary string.
@@ -299,14 +352,24 @@ def _build_summary_text(
 
     # Counts
     parts: list[str] = []
-    if passed > 0:
-        parts.append(f"{passed} passed")
-    if failed > 0:
-        parts.append(f"{failed} failed")
-    if skipped > 0:
-        parts.append(f"{skipped} skipped")
-    if error > 0:
-        parts.append(f"{error} errors")
+    requested_counts = focused_summary or {}
+    include_requested_zero_counts = any(
+        value > 0 for value in requested_counts.values()
+    )
+    for field, value in requested_counts.items():
+        if value > 0 or include_requested_zero_counts:
+            parts.append(f"{value} {_format_count_label(field)}")
+
+    for field, value in (
+        ("passed", passed),
+        ("failed", failed),
+        ("skipped", skipped),
+        ("error", error),
+    ):
+        if field in requested_counts:
+            continue
+        if value > 0:
+            parts.append(f"{value} {_format_count_label(field)}")
     if parts:
         count_line = f"Tests: {', '.join(parts)} ({total} total)"
         lines.append(count_line)
@@ -370,6 +433,35 @@ def _parse_structured_results(
     if not isinstance(summary, dict):
         raise ValueError("test_results.summary must be a JSON object")
 
+    summary_fields = _coerce_summary_fields(data.get("summary_fields"))
+    raw_focused_summary = _coerce_named_counts(data.get("focused_summary"))
+    focused_summary: dict[str, int] = {}
+    seen_focused_fields: set[str] = set()
+    for field in summary_fields:
+        if field in raw_focused_summary:
+            focused_summary[field] = raw_focused_summary[field]
+            seen_focused_fields.add(field)
+        elif field in summary:
+            focused_summary[field] = int(summary[field])
+            seen_focused_fields.add(field)
+    for field, value in raw_focused_summary.items():
+        if field in seen_focused_fields:
+            continue
+        focused_summary[field] = value
+
+    raw_unmapped_summary_fields = _coerce_summary_fields(
+        data.get("unmapped_summary_fields"),
+    )
+    if raw_unmapped_summary_fields:
+        unmapped_summary_fields = raw_unmapped_summary_fields
+    else:
+        unmapped_summary_fields = tuple(
+            field
+            for field in summary_fields
+            if field not in focused_summary
+            and field not in _SUMMARY_FIELD_ORDER
+        )
+
     return {
         "records": data.get("records", []),
         "truncated": bool(data.get("truncated", False)),
@@ -381,6 +473,9 @@ def _parse_structured_results(
             "error": int(summary.get("error", 0)),
             "incomplete": int(summary.get("incomplete", 0)),
         },
+        "summary_fields": summary_fields,
+        "focused_summary": focused_summary,
+        "unmapped_summary_fields": unmapped_summary_fields,
     }
 
 
@@ -634,6 +729,12 @@ class SummarizeRunTool(BaseTool):
             has_ssh_error=False,
             ssh_error_message="",
             narrative="",
+            summary_fields=parsed.get("summary_fields", ()),
+            focused_summary=parsed.get("focused_summary", {}),
+            unmapped_summary_fields=parsed.get(
+                "unmapped_summary_fields",
+                (),
+            ),
         )
 
     # -- Mode 2: Tool call history ------------------------------------------
@@ -681,6 +782,12 @@ class SummarizeRunTool(BaseTool):
                 has_ssh_error=has_ssh_error,
                 ssh_error_message=ssh_error_message,
                 narrative="",
+                summary_fields=parsed_results.get("summary_fields", ()),
+                focused_summary=parsed_results.get("focused_summary", {}),
+                unmapped_summary_fields=parsed_results.get(
+                    "unmapped_summary_fields",
+                    (),
+                ),
             )
 
         # No parse_test_output in history -- produce a minimal summary
@@ -782,6 +889,9 @@ class SummarizeRunTool(BaseTool):
         narrative: str,
         key_failures: list[str] | None = None,
         raw_excerpt: str = "",
+        summary_fields: tuple[str, ...] = (),
+        focused_summary: dict[str, int] | None = None,
+        unmapped_summary_fields: tuple[str, ...] = (),
     ) -> ToolResult:
         """Build the unified output JSON from normalized inputs.
 
@@ -834,6 +944,7 @@ class SummarizeRunTool(BaseTool):
             skipped=skipped,
             error=error,
             total=total,
+            focused_summary=focused_summary,
             framework=framework,
             duration_seconds=duration_seconds,
             failure_highlights=failure_highlights,
@@ -856,6 +967,14 @@ class SummarizeRunTool(BaseTool):
             "narrative": narrative,
             "raw_excerpt": raw_excerpt,
         }
+        if summary_fields:
+            result_data["summary_fields"] = list(summary_fields)
+        if focused_summary:
+            result_data["focused_summary"] = focused_summary
+        if unmapped_summary_fields:
+            result_data["unmapped_summary_fields"] = list(
+                unmapped_summary_fields
+            )
 
         return ToolResult(
             call_id=call_id,

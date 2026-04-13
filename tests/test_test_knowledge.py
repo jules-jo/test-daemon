@@ -43,6 +43,7 @@ def _make_knowledge(
     command_pattern: str = "python3 agent_test.py",
     purpose: str = "",
     output_format: str = "",
+    summary_fields: tuple[str, ...] = (),
     common_failures: tuple[str, ...] = (),
     normal_behavior: str = "",
     runs_observed: int = 0,
@@ -53,6 +54,7 @@ def _make_knowledge(
         command_pattern=command_pattern,
         purpose=purpose,
         output_format=output_format,
+        summary_fields=summary_fields,
         common_failures=common_failures,
         normal_behavior=normal_behavior,
         runs_observed=runs_observed,
@@ -218,6 +220,7 @@ class TestPromptContext:
         k = _make_knowledge(
             purpose="Runs the agent test suite",
             output_format="Iteration N: PASSED|FAILED",
+            summary_fields=("passed", "failed"),
             normal_behavior="Completes in under 30s with all PASSED",
             common_failures=("timeout", "connection refused"),
             runs_observed=4,
@@ -225,6 +228,7 @@ class TestPromptContext:
         text = k.to_prompt_context()
         assert "Purpose:" in text
         assert "Output format:" in text
+        assert "Summary fields:" in text
         assert "Normal behavior:" in text
         assert "Common failure patterns:" in text
         assert "timeout" in text
@@ -236,6 +240,7 @@ class TestPromptContext:
         text = k.to_prompt_context()
         assert "Purpose:" in text
         assert "Output format:" not in text
+        assert "Summary fields:" not in text
         assert "Common failure patterns:" not in text
 
 
@@ -262,6 +267,7 @@ class TestLoadAndSave:
         k = _make_knowledge(
             purpose="run the agent",
             output_format="iteration N: PASSED|FAILED",
+            summary_fields=("passed", "failed"),
         )
         path = save_test_knowledge(wiki_root, k)
         raw = path.read_text(encoding="utf-8")
@@ -269,6 +275,7 @@ class TestLoadAndSave:
         assert doc.frontmatter.get("type") == "test-knowledge"
         assert doc.frontmatter.get("test_slug") == "agent-test-py"
         assert doc.frontmatter.get("purpose") == "run the agent"
+        assert doc.frontmatter.get("summary_fields") == ["passed", "failed"]
 
     def test_round_trip_preserves_fields(self, wiki_root: Path) -> None:
         original = _make_knowledge(
@@ -276,6 +283,7 @@ class TestLoadAndSave:
             command_pattern="python3 agent_test.py",
             purpose="Runs the agent",
             output_format="Iteration N: PASSED|FAILED",
+            summary_fields=("passed", "failed"),
             normal_behavior="All iterations PASSED",
             common_failures=("timeout", "ConnectionError"),
             runs_observed=3,
@@ -287,6 +295,7 @@ class TestLoadAndSave:
         assert loaded.command_pattern == original.command_pattern
         assert loaded.purpose == original.purpose
         assert loaded.output_format == original.output_format
+        assert loaded.summary_fields == original.summary_fields
         assert loaded.normal_behavior == original.normal_behavior
         assert loaded.common_failures == original.common_failures
         assert loaded.runs_observed == original.runs_observed
@@ -337,6 +346,7 @@ class TestLoadAndSave:
         assert loaded is not None
         assert loaded.purpose == "human-curated purpose"
         assert loaded.output_format == ""
+        assert loaded.summary_fields == ()
         assert loaded.common_failures == ()
         assert loaded.runs_observed == 0
 
@@ -362,6 +372,7 @@ class TestMergeKnowledge:
         observations = {
             "purpose": "runs the agent",
             "output_format": "iteration logs",
+            "summary_fields": ["passed", "failed"],
             "normal_behavior": "all PASSED",
             "common_failures": ["timeout"],
         }
@@ -373,6 +384,7 @@ class TestMergeKnowledge:
         )
         assert merged.purpose == "runs the agent"
         assert merged.output_format == "iteration logs"
+        assert merged.summary_fields == ("passed", "failed")
         assert merged.normal_behavior == "all PASSED"
         assert merged.common_failures == ("timeout",)
         assert merged.runs_observed == 1
@@ -397,6 +409,28 @@ class TestMergeKnowledge:
         existing = _make_knowledge(purpose="", runs_observed=2)
         merged = merge_knowledge(existing, {"purpose": "fresh purpose"})
         assert merged.purpose == "fresh purpose"
+
+    def test_existing_summary_fields_are_preserved(self) -> None:
+        existing = _make_knowledge(
+            summary_fields=("passed", "failed"),
+            runs_observed=2,
+        )
+        merged = merge_knowledge(
+            existing,
+            {"summary_fields": ["iterations_done", "slot_errors"]},
+        )
+        assert merged.summary_fields == ("passed", "failed")
+
+    def test_empty_existing_summary_fields_adopts_new(self) -> None:
+        existing = _make_knowledge(summary_fields=(), runs_observed=2)
+        merged = merge_knowledge(
+            existing,
+            {"summary_fields": ["iterations_done", "slot_errors"]},
+        )
+        assert merged.summary_fields == (
+            "iterations_done",
+            "slot_errors",
+        )
 
     def test_failures_unioned_and_deduped(self) -> None:
         existing = _make_knowledge(

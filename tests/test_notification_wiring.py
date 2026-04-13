@@ -12,21 +12,107 @@ notification payload construction (which is covered in
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from jules_daemon.ipc.framing import (
+    HEADER_SIZE,
+    MessageEnvelope,
+    MessageType,
+    decode_envelope,
+)
 from jules_daemon.ipc.notification_broadcaster import (
     BroadcastResult,
     NotificationBroadcaster,
+    NotificationBroadcasterConfig,
 )
+from jules_daemon.ipc.server import ClientConnection
 from jules_daemon.protocol.notifications import (
+    AlertNotification,
+    CompletionNotification,
+    HeartbeatNotification,
+    NotificationEnvelope,
     NotificationEventType,
     NotificationSeverity,
+    create_notification_envelope,
 )
+
+
+# ---------------------------------------------------------------------------
+# Test helpers
+# ---------------------------------------------------------------------------
+
+
+class _RecordingWriter:
+    """Minimal StreamWriter test double that records complete frames."""
+
+    def __init__(self) -> None:
+        self.frames: list[bytes] = []
+        self._closed = False
+
+    def write(self, data: bytes) -> None:
+        self.frames.append(data)
+
+    async def drain(self) -> None:
+        return None
+
+    def is_closing(self) -> bool:
+        return self._closed
+
+
+def _make_client(
+    *,
+    client_id: str = "notif-client-001",
+    writer: _RecordingWriter | None = None,
+) -> ClientConnection:
+    """Build a client connection using a recording writer."""
+    return ClientConnection(
+        client_id=client_id,
+        reader=AsyncMock(spec=asyncio.StreamReader),
+        writer=writer or _RecordingWriter(),  # type: ignore[arg-type]
+        connected_at="2026-04-13T12:00:00Z",
+    )
+
+
+def _make_request(
+    payload: dict[str, Any],
+    msg_id: str = "req-001",
+) -> MessageEnvelope:
+    """Build a request envelope for notification-subscription tests."""
+    return MessageEnvelope(
+        msg_type=MessageType.REQUEST,
+        msg_id=msg_id,
+        timestamp="2026-04-13T12:00:00Z",
+        payload=payload,
+    )
+
+
+def _decode_frame(frame: bytes) -> MessageEnvelope:
+    """Decode a full length-prefixed frame captured by _RecordingWriter."""
+    return decode_envelope(frame[HEADER_SIZE:])
+
+
+async def _wait_for_frames(
+    writer: _RecordingWriter,
+    *,
+    minimum: int = 1,
+    timeout: float = 1.0,
+) -> list[bytes]:
+    """Poll until the writer has recorded at least minimum frames."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while len(writer.frames) < minimum:
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError(
+                f"Timed out waiting for {minimum} frame(s), got {len(writer.frames)}"
+            )
+        await asyncio.sleep(0.01)
+    return writer.frames
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +152,228 @@ class TestRequestHandlerConfigBroadcaster:
         )
         with pytest.raises(AttributeError):
             config.notification_broadcaster = None  # type: ignore[misc]
+
+
+class TestRequestHandlerNotificationSubscriptions:
+    """Verify the request handler exposes the notification channel."""
+
+    @pytest.mark.asyncio()
+    async def test_subscribe_streams_completion_events(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from jules_daemon.ipc.request_handler import (
+            RequestHandler,
+            RequestHandlerConfig,
+        )
+
+        writer = _RecordingWriter()
+        client = _make_client(writer=writer)
+        broadcaster = NotificationBroadcaster(
+            config=NotificationBroadcasterConfig(
+                heartbeat_interval_seconds=5,
+            ),
+        )
+        handler = RequestHandler(
+            config=RequestHandlerConfig(
+                wiki_root=tmp_path,
+                notification_broadcaster=broadcaster,
+            )
+        )
+
+        subscribe_response = await handler.handle_message(
+            _make_request(
+                {
+                    "verb": "subscribe_notifications",
+                    "payload_type": "subscribe_notifications",
+                    "event_filter": ["completion"],
+                }
+            ),
+            client,
+        )
+
+        assert subscribe_response.msg_type is MessageType.RESPONSE
+        assert subscribe_response.payload["payload_type"] == (
+            "subscribe_notifications_response"
+        )
+        subscription_id = subscribe_response.payload["subscription_id"]
+
+        completion = create_notification_envelope(
+            event_type=NotificationEventType.COMPLETION,
+            payload=CompletionNotification(
+                run_id="notif-run-001",
+                natural_language_command="run smoke tests",
+                exit_status=0,
+            ),
+        )
+        await broadcaster.broadcast(completion)
+        frames = await _wait_for_frames(writer, minimum=1)
+        streamed = _decode_frame(frames[0])
+        notification = NotificationEnvelope.model_validate(
+            streamed.payload["notification"]
+        )
+
+        assert streamed.msg_type is MessageType.STREAM
+        assert streamed.payload["verb"] == "notification"
+        assert notification.event_type is NotificationEventType.COMPLETION
+        assert isinstance(notification.payload, CompletionNotification)
+        assert notification.payload.run_id == "notif-run-001"
+
+        unsubscribe_response = await handler.handle_message(
+            _make_request(
+                {
+                    "verb": "unsubscribe_notifications",
+                    "payload_type": "unsubscribe_notifications",
+                    "subscription_id": subscription_id,
+                },
+                msg_id="req-unsub-001",
+            ),
+            client,
+        )
+        assert unsubscribe_response.msg_type is MessageType.RESPONSE
+        assert unsubscribe_response.payload["payload_type"] == (
+            "unsubscribe_notifications_response"
+        )
+        assert broadcaster.has_subscriber(subscription_id) is False
+
+    @pytest.mark.asyncio()
+    async def test_completion_only_subscription_still_receives_heartbeat(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from jules_daemon.ipc.request_handler import (
+            RequestHandler,
+            RequestHandlerConfig,
+        )
+
+        writer = _RecordingWriter()
+        client = _make_client(writer=writer, client_id="notif-client-heartbeat")
+        broadcaster = NotificationBroadcaster(
+            config=NotificationBroadcasterConfig(
+                heartbeat_interval_seconds=1,
+            ),
+        )
+        handler = RequestHandler(
+            config=RequestHandlerConfig(
+                wiki_root=tmp_path,
+                notification_broadcaster=broadcaster,
+            )
+        )
+
+        subscribe_response = await handler.handle_message(
+            _make_request(
+                {
+                    "verb": "subscribe_notifications",
+                    "payload_type": "subscribe_notifications",
+                    "event_filter": ["completion"],
+                },
+                msg_id="req-sub-heartbeat",
+            ),
+            client,
+        )
+        subscription_id = subscribe_response.payload["subscription_id"]
+
+        frames = await _wait_for_frames(writer, minimum=1, timeout=2.5)
+        streamed = _decode_frame(frames[0])
+        notification = NotificationEnvelope.model_validate(
+            streamed.payload["notification"]
+        )
+
+        assert notification.event_type is NotificationEventType.HEARTBEAT
+        assert isinstance(notification.payload, HeartbeatNotification)
+
+        await handler.handle_message(
+            _make_request(
+                {
+                    "verb": "unsubscribe_notifications",
+                    "payload_type": "unsubscribe_notifications",
+                    "subscription_id": subscription_id,
+                },
+                msg_id="req-unsub-heartbeat",
+            ),
+            client,
+        )
+
+
+class TestDaemonStartupNotificationWiring:
+    """Verify the daemon enables the broadcaster in its default startup path."""
+
+    @pytest.mark.asyncio()
+    async def test_run_daemon_passes_broadcaster_to_request_handler(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from jules_daemon.__main__ import _run_daemon
+
+        captured_config = {}
+
+        class _FakeHandler:
+            def __init__(self, *, config: Any) -> None:
+                captured_config["config"] = config
+                self._last_completed_run = None
+                self._last_failure = None
+
+        class _FakeServer:
+            def __init__(self, *, config: Any, handler: Any) -> None:
+                self.config = config
+                self.handler = handler
+
+            async def __aenter__(self) -> "_FakeServer":
+                return self
+
+            async def __aexit__(
+                self,
+                exc_type: Any,
+                exc: Any,
+                tb: Any,
+            ) -> None:
+                return None
+
+        class _ImmediateEvent:
+            def set(self) -> None:
+                return None
+
+            async def wait(self) -> None:
+                return None
+
+        fake_loop = SimpleNamespace(add_signal_handler=lambda *args: None)
+        startup_result = SimpleNamespace(
+            is_ready=True,
+            duration_seconds=0.01,
+            final_phase=SimpleNamespace(value="ready"),
+            error=None,
+        )
+
+        with patch("jules_daemon.__main__.initialize_wiki"), patch(
+            "jules_daemon.__main__.try_crash_recovery",
+            new=AsyncMock(return_value=None),
+        ), patch(
+            "jules_daemon.__main__.run_startup",
+            new=AsyncMock(return_value=startup_result),
+        ), patch(
+            "jules_daemon.__main__._try_load_llm",
+            return_value=(None, None),
+        ), patch(
+            "jules_daemon.__main__.RequestHandler",
+            _FakeHandler,
+        ), patch(
+            "jules_daemon.__main__.SocketServer",
+            _FakeServer,
+        ), patch(
+            "jules_daemon.__main__.asyncio.Event",
+            _ImmediateEvent,
+        ), patch(
+            "jules_daemon.__main__.asyncio.get_running_loop",
+            return_value=fake_loop,
+        ):
+            result = await _run_daemon(
+                tmp_path / "wiki",
+                tmp_path / "daemon.sock",
+                skip_scan=True,
+            )
+
+        assert result == 0
+        assert captured_config["config"].notification_broadcaster is not None
 
 
 # ---------------------------------------------------------------------------

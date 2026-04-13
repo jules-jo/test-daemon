@@ -350,6 +350,7 @@ async def execute_run(
     wiki_root: Path,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     on_output: Callable[[str], None] | None = None,
+    run_id: str | None = None,
 ) -> RunResult:
     """Execute a command on a remote host via SSH.
 
@@ -372,6 +373,9 @@ async def execute_run(
         target_port: SSH port (default 22).
         wiki_root: Path to the wiki root directory.
         timeout: Maximum execution time in seconds (default 1 hour).
+        run_id: Optional caller-supplied run identifier. When provided,
+            the wiki current-run record and returned RunResult reuse this
+            identifier instead of generating a fresh one internally.
 
     Returns:
         RunResult with execution outcome, output, and metadata.
@@ -388,7 +392,7 @@ async def execute_run(
 
     # Create initial run record
     daemon_pid = os.getpid()
-    run = CurrentRun()
+    run = CurrentRun(run_id=run_id) if run_id is not None else CurrentRun()
     run = run.with_pending_approval(
         ssh_target=ssh_target,
         command=cmd,

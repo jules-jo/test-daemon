@@ -326,6 +326,11 @@ class NotificationBroadcaster:
         """Number of currently registered subscribers."""
         return len(self._subscribers)
 
+    @property
+    def heartbeat_interval_seconds(self) -> int:
+        """Configured heartbeat cadence for notification subscribers."""
+        return self._config.heartbeat_interval_seconds
+
     # -- Subscribe ------------------------------------------------------------
 
     async def subscribe(

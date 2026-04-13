@@ -51,11 +51,14 @@ def _parse_test_results(
     framework: str = "pytest",
     records: list[dict[str, Any]] | None = None,
     truncated: bool = False,
+    summary_fields: list[str] | tuple[str, ...] | None = None,
+    focused_summary: dict[str, int] | None = None,
+    unmapped_summary_fields: list[str] | tuple[str, ...] | None = None,
 ) -> str:
     """Build a parse_test_output JSON string for testing."""
     if records is None:
         records = []
-    return json.dumps({
+    data: dict[str, Any] = {
         "records": records,
         "truncated": truncated,
         "framework": framework,
@@ -67,7 +70,14 @@ def _parse_test_results(
             "error": error,
             "incomplete": incomplete,
         },
-    })
+    }
+    if summary_fields is not None:
+        data["summary_fields"] = list(summary_fields)
+    if focused_summary is not None:
+        data["focused_summary"] = focused_summary
+    if unmapped_summary_fields is not None:
+        data["unmapped_summary_fields"] = list(unmapped_summary_fields)
+    return json.dumps(data)
 
 
 def _tool_history_entry(
@@ -579,6 +589,26 @@ class TestBuildSummaryText:
         assert "5 passed" in text
         assert "failed" not in text.lower().replace("run summary", "")
 
+    def test_focused_summary_reorders_counts_and_keeps_requested_zeroes(
+        self,
+    ) -> None:
+        text = _build_summary_text(
+            overall_status="MIXED",
+            passed=8,
+            failed=2,
+            skipped=1,
+            error=0,
+            total=11,
+            framework="pytest",
+            duration_seconds=None,
+            failure_highlights=[],
+            suggested_next_actions=[],
+            command="pytest tests/",
+            narrative="",
+            focused_summary={"failed": 2, "passed": 8, "error": 0},
+        )
+        assert "Tests: 2 failed, 8 passed, 0 errors, 1 skipped (11 total)" in text
+
     def test_no_counts_shows_none_detected(self) -> None:
         text = _build_summary_text(
             overall_status="NO_TESTS", passed=0, failed=0, skipped=0,
@@ -689,6 +719,26 @@ class TestParseStructuredResults:
         result = _parse_structured_results(data)
         assert len(result["records"]) == 1
         assert result["records"][0]["name"] == "t1"
+
+    def test_summary_fields_and_focused_summary_preserved(self) -> None:
+        data = _parse_test_results(
+            passed=8,
+            failed=2,
+            summary_fields=["failed", "passed", "iterations_done"],
+            focused_summary={"failed": 2, "passed": 8},
+            unmapped_summary_fields=["iterations_done"],
+        )
+        result = _parse_structured_results(data)
+        assert result["summary_fields"] == (
+            "failed",
+            "passed",
+            "iterations_done",
+        )
+        assert result["focused_summary"] == {
+            "failed": 2,
+            "passed": 8,
+        }
+        assert result["unmapped_summary_fields"] == ("iterations_done",)
 
 
 # ---------------------------------------------------------------------------
@@ -1293,6 +1343,37 @@ class TestStructuredTestResultsInput:
         data = json.loads(result.output)
         # No tests detected + non-zero exit -> ERROR
         assert data["overall_status"] == "ERROR"
+
+    @pytest.mark.asyncio
+    async def test_focused_summary_drives_summary_text_and_output(self) -> None:
+        tool = SummarizeRunTool()
+        test_results = _parse_test_results(
+            passed=8,
+            failed=2,
+            skipped=1,
+            summary_fields=["failed", "passed", "iterations_done"],
+            focused_summary={"failed": 2, "passed": 8},
+            unmapped_summary_fields=["iterations_done"],
+        )
+        result = await tool.execute({
+            "test_results": test_results,
+            "command": "pytest tests/",
+            "_call_id": "c6",
+        })
+        data = json.loads(result.output)
+        assert data["summary_fields"] == [
+            "failed",
+            "passed",
+            "iterations_done",
+        ]
+        assert data["focused_summary"] == {
+            "failed": 2,
+            "passed": 8,
+        }
+        assert data["unmapped_summary_fields"] == ["iterations_done"]
+        assert "Tests: 2 failed, 8 passed, 1 skipped (11 total)" in (
+            data["summary_text"]
+        )
 
 
 # ---------------------------------------------------------------------------

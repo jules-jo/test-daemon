@@ -1,12 +1,13 @@
-"""notify_user tool -- pushes notification events to CLI subscribers.
+"""notify_user tool -- prefers broadcaster-backed notification delivery.
 
-Sends a notification message to any connected CLI clients via the
-persistent notification subscription channel. Used for progress updates,
-completion alerts, and anomaly warnings.
+Sends a notification message through the daemon's persistent
+notification subscription channel when subscribers exist, with a direct
+IPC fallback for the active client when they do not. Used for progress
+updates, completion alerts, and anomaly warnings.
 
 Delegates to:
     - The notification callback injected at construction (wraps the
-      daemon's event bus or direct IPC push mechanism)
+      daemon's event bus and may fall back to direct IPC push)
 
 Usage::
 
@@ -48,11 +49,11 @@ _VALID_SEVERITIES = ("info", "warning", "error", "success")
 
 
 class NotifyUserTool(BaseTool):
-    """Push a notification to connected CLI subscribers.
+    """Push a notification to connected CLI clients.
 
-    Sends notification events through the daemon's persistent
-    subscription channel. Connected CLIs receive these as real-time
-    push events.
+    Prefers the daemon's persistent subscription channel when available.
+    If no subscribers are present, the injected callback may fall back
+    to a direct best-effort IPC stream to the active client.
 
     This is a read-only tool (ApprovalRequirement.NONE) because it
     only pushes informational messages and does not change system state.
@@ -90,7 +91,8 @@ class NotifyUserTool(BaseTool):
     async def execute(self, args: dict[str, Any]) -> ToolResult:
         """Send a notification to connected CLI subscribers.
 
-        Delegates to the notify_callback which handles the IPC push.
+        Delegates to the notify_callback which handles broadcaster-backed
+        delivery or direct IPC fallback.
         """
         message = args.get("message", "")
         severity = args.get("severity", "info")

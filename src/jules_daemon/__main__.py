@@ -28,6 +28,7 @@ try:
 except ImportError:
     pass
 
+from jules_daemon.ipc.notification_broadcaster import NotificationBroadcaster
 from jules_daemon.ipc.request_handler import RequestHandler, RequestHandlerConfig
 from jules_daemon.ipc.server import ServerConfig, SocketServer
 from jules_daemon.ipc.socket_discovery import default_socket_path
@@ -304,11 +305,13 @@ async def _run_daemon(
 
     # Step 4: Set up IPC server (with optional LLM translation)
     llm_client, llm_config = _try_load_llm()
+    notification_broadcaster = NotificationBroadcaster()
     handler_config = RequestHandlerConfig(
         wiki_root=wiki_dir,
         llm_client=llm_client,
         llm_config=llm_config,
         one_shot=one_shot,
+        notification_broadcaster=notification_broadcaster,
     )
     if one_shot:
         logger.info(

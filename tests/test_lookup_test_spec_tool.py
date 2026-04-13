@@ -60,6 +60,7 @@ def _save_knowledge(
     command: str = "python3 ~/agent_test.py",
     purpose: str = "Tests the agent loop",
     output_format: str = "iteration counts",
+    summary_fields: tuple[str, ...] = ("passed", "failed", "iterations_done"),
     common_failures: tuple[str, ...] = ("timeout on large inputs",),
     normal_behavior: str = "All iterations pass",
     required_args: tuple[str, ...] = (),
@@ -76,6 +77,7 @@ def _save_knowledge(
         command_pattern=command,
         purpose=purpose,
         output_format=output_format,
+        summary_fields=summary_fields,
         common_failures=common_failures,
         normal_behavior=normal_behavior,
         required_args=required_args,
@@ -174,6 +176,11 @@ class TestWikiDelegation:
         assert data["command_pattern"] == "python3 ~/agent_test.py"
         assert data["purpose"] == "Tests the agent loop"
         assert data["output_format"] == "iteration counts"
+        assert data["summary_fields"] == [
+            "passed",
+            "failed",
+            "iterations_done",
+        ]
         assert "timeout on large inputs" in data["common_failures"]
         assert data["normal_behavior"] == "All iterations pass"
         assert data["required_args"] == ["iterations", "host"]
@@ -717,6 +724,7 @@ class TestJsonOutputStructure:
             "command_pattern",
             "purpose",
             "output_format",
+            "summary_fields",
             "common_failures",
             "normal_behavior",
             "required_args",
@@ -777,6 +785,25 @@ class TestJsonOutputStructure:
         data = json.loads(result.output)
         assert isinstance(data["required_args"], list)
         assert data["required_args"] == ["host", "port"]
+
+    @pytest.mark.asyncio
+    async def test_summary_fields_is_list(
+        self, wiki_root: Path, tool: LookupTestSpecTool
+    ) -> None:
+        """summary_fields must be serialized as a JSON array."""
+        _save_knowledge(
+            wiki_root,
+            summary_fields=("passed", "failed", "skipped"),
+        )
+
+        result = await tool.execute(
+            call_id="schema4b",
+            args={"test_name": "python3 ~/agent_test.py"},
+        )
+
+        data = json.loads(result.output)
+        assert isinstance(data["summary_fields"], list)
+        assert data["summary_fields"] == ["passed", "failed", "skipped"]
 
     @pytest.mark.asyncio
     async def test_runs_observed_is_integer(

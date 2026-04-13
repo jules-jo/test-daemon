@@ -12,17 +12,25 @@ correctly bridges the socket server to the validation + dispatch pipeline:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
-from jules_daemon.ipc.framing import MessageEnvelope, MessageType
+from jules_daemon.ipc.framing import (
+    HEADER_SIZE,
+    MessageEnvelope,
+    MessageType,
+    decode_envelope,
+)
+from jules_daemon.ipc.notification_broadcaster import NotificationBroadcaster
 from jules_daemon.ipc.request_handler import (
     RequestHandler,
     RequestHandlerConfig,
 )
+from jules_daemon.protocol.notifications import NotificationEventType
 from jules_daemon.ipc.server import ClientConnection
 
 
@@ -257,6 +265,403 @@ class TestRequestHandlerStatusVerb:
 
         response = await handler.handle_message(envelope, client)
         assert response.msg_type == MessageType.RESPONSE
+
+    @pytest.mark.asyncio
+    async def test_status_active_includes_test_context_and_parsed_output(
+        self, tmp_path: Path
+    ) -> None:
+        from jules_daemon.wiki import current_run as cr_io
+        from jules_daemon.wiki.layout import initialize_wiki
+        from jules_daemon.wiki.models import (
+            Command,
+            CurrentRun,
+            ProcessIDs,
+            RunStatus,
+            SSHTarget,
+        )
+        from jules_daemon.wiki.test_knowledge import (
+            TestKnowledge,
+            derive_test_slug,
+            save_test_knowledge,
+        )
+
+        initialize_wiki(tmp_path)
+        command = "pytest tests/test_status.py -v"
+        slug = derive_test_slug(command)
+        save_test_knowledge(
+            tmp_path,
+            TestKnowledge(
+                test_slug=slug,
+                command_pattern=command,
+                purpose="Status smoke coverage",
+                output_format="pytest verbose lines",
+                summary_fields=("passed", "failed", "incomplete"),
+                normal_behavior="Tests emit PASSED/FAILED markers",
+                required_args=("env",),
+                runs_observed=3,
+            ),
+        )
+
+        run = CurrentRun(
+            status=RunStatus.RUNNING,
+            run_id="run-status-active",
+            ssh_target=SSHTarget(host="host.example.com", user="deploy"),
+            command=Command(
+                natural_language="run status smoke coverage",
+                resolved_shell=command,
+                approved=True,
+            ),
+            pids=ProcessIDs(daemon=1234),
+        )
+        cr_io.write(tmp_path, run)
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+        handler._current_run_id = run.run_id
+        handler._output_buffer = [
+            "tests/test_status.py::test_one PASSED\n",
+            "tests/test_status.py::test_two FAILED\n",
+            "tests/test_status.py::test_three",
+        ]
+
+        async def _long_running() -> None:
+            await asyncio.sleep(3600)
+
+        handler._current_task = asyncio.create_task(_long_running())
+        envelope = _make_request(payload={"verb": "status"})
+        response = await handler.handle_message(envelope, client)
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["state"] == "active"
+        assert response.payload["test_context"]["purpose"] == (
+            "Status smoke coverage"
+        )
+        assert response.payload["test_context"]["summary_fields"] == [
+            "passed",
+            "failed",
+            "incomplete",
+        ]
+        assert response.payload["parsed_output"]["framework"] == "pytest"
+        assert response.payload["parsed_output"]["summary"]["passed"] == 1
+        assert response.payload["parsed_output"]["summary"]["failed"] == 1
+        assert response.payload["parsed_output"]["summary"]["incomplete"] == 1
+        assert response.payload["parsed_output"]["focused_summary"] == {
+            "passed": 1,
+            "failed": 1,
+            "incomplete": 1,
+        }
+        assert (
+            "pytest so far: 1 passed, 1 failed, 1 incomplete"
+            in response.payload["status_summary"]
+        )
+
+        handler._current_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await handler._current_task
+
+    @pytest.mark.asyncio
+    async def test_status_completed_includes_test_context_and_parsed_output(
+        self, tmp_path: Path
+    ) -> None:
+        from jules_daemon.execution.run_pipeline import RunResult
+        from jules_daemon.wiki.layout import initialize_wiki
+        from jules_daemon.wiki.test_knowledge import (
+            TestKnowledge,
+            derive_test_slug,
+            save_test_knowledge,
+        )
+
+        initialize_wiki(tmp_path)
+        command = "pytest tests/test_status.py -v"
+        slug = derive_test_slug(command)
+        save_test_knowledge(
+            tmp_path,
+            TestKnowledge(
+                test_slug=slug,
+                command_pattern=command,
+                purpose="Completed status smoke coverage",
+                output_format="pytest verbose lines",
+                summary_fields=("passed", "failed"),
+                runs_observed=7,
+            ),
+        )
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+        handler._last_completed_run = RunResult(
+            success=False,
+            run_id="run-status-complete",
+            command=command,
+            target_host="host.example.com",
+            target_user="deploy",
+            exit_code=1,
+            stdout=(
+                "tests/test_status.py::test_one PASSED\n"
+                "tests/test_status.py::test_two FAILED\n"
+            ),
+            stderr="FAILED tests/test_status.py::test_two - AssertionError\n",
+            error="Command exited with code 1",
+            duration_seconds=2.5,
+        )
+
+        envelope = _make_request(payload={"verb": "status"})
+        response = await handler.handle_message(envelope, client)
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["state"] == "completed"
+        assert response.payload["test_context"]["purpose"] == (
+            "Completed status smoke coverage"
+        )
+        assert response.payload["test_context"]["summary_fields"] == [
+            "passed",
+            "failed",
+        ]
+        assert response.payload["parsed_output"]["framework"] == "pytest"
+        assert response.payload["parsed_output"]["summary"]["passed"] == 1
+        assert response.payload["parsed_output"]["summary"]["failed"] == 1
+        assert response.payload["parsed_output"]["focused_summary"] == {
+            "passed": 1,
+            "failed": 1,
+        }
+        assert "pytest summary: 1 passed, 1 failed" in (
+            response.payload["status_summary"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_status_summary_prefers_spec_summary_field_order(
+        self, tmp_path: Path
+    ) -> None:
+        from jules_daemon.execution.run_pipeline import RunResult
+        from jules_daemon.wiki.layout import initialize_wiki
+        from jules_daemon.wiki.test_knowledge import (
+            TestKnowledge,
+            derive_test_slug,
+            save_test_knowledge,
+        )
+
+        initialize_wiki(tmp_path)
+        command = "pytest tests/test_status.py -v"
+        slug = derive_test_slug(command)
+        save_test_knowledge(
+            tmp_path,
+            TestKnowledge(
+                test_slug=slug,
+                command_pattern=command,
+                summary_fields=("failed", "passed", "iterations_done"),
+                runs_observed=2,
+            ),
+        )
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+        handler._last_completed_run = RunResult(
+            success=False,
+            run_id="run-status-ordered",
+            command=command,
+            target_host="host.example.com",
+            target_user="deploy",
+            exit_code=1,
+            stdout=(
+                "tests/test_status.py::test_one PASSED\n"
+                "tests/test_status.py::test_two FAILED\n"
+            ),
+            stderr="",
+            error="Command exited with code 1",
+            duration_seconds=1.5,
+        )
+
+        envelope = _make_request(payload={"verb": "status"})
+        response = await handler.handle_message(envelope, client)
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["state"] == "completed"
+        assert response.payload["parsed_output"]["focused_summary"] == {
+            "failed": 1,
+            "passed": 1,
+        }
+        assert response.payload["parsed_output"]["unmapped_summary_fields"] == [
+            "iterations_done",
+        ]
+        assert "pytest summary: 1 failed, 1 passed" in (
+            response.payload["status_summary"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_status_active_includes_recent_output_tail(
+        self, tmp_path: Path
+    ) -> None:
+        from jules_daemon.wiki.models import (
+            Command,
+            CurrentRun,
+            ProcessIDs,
+            RunStatus,
+            SSHTarget,
+        )
+        from jules_daemon.wiki import current_run as cr_io
+
+        run = CurrentRun(
+            status=RunStatus.RUNNING,
+            run_id="run-live-1",
+            ssh_target=SSHTarget(host="host.example.com", user="deploy"),
+            command=Command(
+                natural_language="run tests",
+                resolved_shell="pytest -q",
+                approved=True,
+            ),
+            pids=ProcessIDs(daemon=1234),
+        )
+        cr_io.write(tmp_path, run)
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+        handler._current_run_id = "run-live-1"
+        handler._output_buffer = [
+            "tests/test_a.py::test_one PASSED\n",
+            "tests/test_b.py::test_two FAILED\n",
+        ]
+
+        async def _long_running() -> None:
+            await asyncio.sleep(3600)
+
+        handler._current_task = asyncio.create_task(_long_running())
+
+        envelope = _make_request(payload={"verb": "status"})
+        response = await handler.handle_message(envelope, client)
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["state"] == "active"
+        assert response.payload["last_output_line"] == (
+            "tests/test_b.py::test_two FAILED"
+        )
+        assert response.payload["recent_output_lines"] == [
+            "tests/test_a.py::test_one PASSED\n",
+            "tests/test_b.py::test_two FAILED\n",
+        ]
+
+        handler._current_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await handler._current_task
+
+    @pytest.mark.asyncio
+    async def test_status_active_prefers_broadcaster_buffer(
+        self, tmp_path: Path,
+    ) -> None:
+        from jules_daemon.wiki import current_run as cr_io
+        from jules_daemon.wiki.models import (
+            Command,
+            CurrentRun,
+            ProcessIDs,
+            RunStatus,
+            SSHTarget,
+        )
+
+        run = CurrentRun(
+            status=RunStatus.RUNNING,
+            run_id="run-live-broadcaster",
+            ssh_target=SSHTarget(host="host.example.com", user="deploy"),
+            command=Command(
+                natural_language="run tests",
+                resolved_shell="pytest -q",
+                approved=True,
+            ),
+            pids=ProcessIDs(daemon=1234),
+        )
+        cr_io.write(tmp_path, run)
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+        handler._current_run_id = "run-live-broadcaster"
+        handler._output_buffer = ["stale buffered line\n"]
+        handler._job_output_broadcaster.register_job("run-live-broadcaster")
+        handler._job_output_broadcaster.publish(
+            "run-live-broadcaster",
+            "tests/test_a.py::test_one PASSED\n",
+        )
+        handler._job_output_broadcaster.publish(
+            "run-live-broadcaster",
+            "tests/test_b.py::test_two FAILED\n",
+        )
+
+        async def _long_running() -> None:
+            await asyncio.sleep(3600)
+
+        handler._current_task = asyncio.create_task(_long_running())
+
+        envelope = _make_request(payload={"verb": "status"})
+        response = await handler.handle_message(envelope, client)
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["state"] == "active"
+        assert response.payload["last_output_line"] == (
+            "tests/test_b.py::test_two FAILED"
+        )
+        assert response.payload["recent_output_lines"] == [
+            "tests/test_a.py::test_one PASSED\n",
+            "tests/test_b.py::test_two FAILED\n",
+        ]
+
+        handler._current_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await handler._current_task
+
+    @pytest.mark.asyncio
+    async def test_status_active_includes_monitor_alert_summary(
+        self, tmp_path: Path,
+    ) -> None:
+        from jules_daemon.wiki import current_run as cr_io
+        from jules_daemon.wiki.models import (
+            Command,
+            CurrentRun,
+            ProcessIDs,
+            RunStatus,
+            SSHTarget,
+        )
+
+        run = CurrentRun(
+            status=RunStatus.RUNNING,
+            run_id="run-live-alerts",
+            ssh_target=SSHTarget(host="host.example.com", user="deploy"),
+            command=Command(
+                natural_language="run tests",
+                resolved_shell="pytest -q",
+                approved=True,
+            ),
+            pids=ProcessIDs(daemon=1234),
+        )
+        cr_io.write(tmp_path, run)
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+        handler._current_run_id = "run-live-alerts"
+
+        async def _long_running() -> None:
+            await asyncio.sleep(3600)
+
+        handler._current_task = asyncio.create_task(_long_running())
+        await handler._process_monitor_output_line(
+            run_id="run-live-alerts",
+            line="SIGSEGV at 0xdeadbeef\n",
+        )
+
+        envelope = _make_request(payload={"verb": "status"})
+        response = await handler.handle_message(envelope, client)
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["state"] == "active"
+        assert response.payload["alert_summary"]["total_alerts"] == 1
+        assert response.payload["alert_summary"]["highest_priority_alerts"][
+            0
+        ]["pattern_name"] == "segfault"
+
+        handler._current_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await handler._current_task
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +1090,116 @@ class TestRequestHandlerWatchVerb:
         assert response.payload["status"] == "completed"
         # Should have sent at least the 2 buffered lines + end-of-stream
         assert len(sent_frames) >= 3
+
+    @pytest.mark.asyncio
+    async def test_watch_streams_active_broadcaster_output(
+        self, tmp_path: Path,
+    ) -> None:
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        handler._current_run_id = "run-watch-live"
+        handler._job_output_broadcaster.register_job("run-watch-live")
+        handler._job_output_broadcaster.publish(
+            "run-watch-live",
+            "line 1\n",
+        )
+
+        async def _long_running() -> None:
+            await asyncio.sleep(3600)
+
+        handler._current_task = asyncio.create_task(_long_running())
+
+        sent_frames: list[bytes] = []
+        client = _make_client()
+
+        def _capture_write(data: bytes) -> None:
+            sent_frames.append(data)
+
+        client.writer.write = _capture_write
+
+        async def _finish_stream() -> None:
+            await asyncio.sleep(0.05)
+            handler._job_output_broadcaster.publish(
+                "run-watch-live",
+                "line 2\n",
+            )
+            handler._job_output_broadcaster.unregister_job("run-watch-live")
+
+        finish_task = asyncio.create_task(_finish_stream())
+
+        envelope = _make_request(payload={"verb": "watch"})
+        response = await handler.handle_message(envelope, client)
+
+        stream_payloads = [
+            decode_envelope(frame[HEADER_SIZE:]).payload for frame in sent_frames
+        ]
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["verb"] == "watch"
+        assert response.payload["status"] == "completed"
+        assert [payload["line"] for payload in stream_payloads[:-1]] == [
+            "line 1\n",
+            "line 2\n",
+        ]
+        assert stream_payloads[-1]["is_end"] is True
+
+        await finish_task
+        handler._current_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await handler._current_task
+
+
+class TestRequestHandlerMonitorAlerts:
+    """Tests for monitor-driven alert collection and emission."""
+
+    @pytest.mark.asyncio
+    async def test_monitor_output_line_emits_alert_notification(
+        self, tmp_path: Path,
+    ) -> None:
+        broadcaster = NotificationBroadcaster()
+        subscription = await broadcaster.subscribe(
+            event_filter=frozenset({NotificationEventType.ALERT}),
+        )
+        config = RequestHandlerConfig(
+            wiki_root=tmp_path,
+            notification_broadcaster=broadcaster,
+        )
+        handler = RequestHandler(config=config)
+
+        await handler._process_monitor_output_line(
+            run_id="run-alert-1",
+            line="SIGSEGV at 0xdeadbeef\n",
+        )
+
+        envelope = await broadcaster.receive(
+            subscription.subscription_id,
+            timeout=1.0,
+        )
+
+        assert envelope is not None
+        assert envelope.event_type is NotificationEventType.ALERT
+        assert envelope.payload.title == "Monitor alert: segfault"
+        assert "SIGSEGV" in envelope.payload.message
+
+    @pytest.mark.asyncio
+    async def test_failure_rate_alert_is_deduped_per_pattern(
+        self, tmp_path: Path,
+    ) -> None:
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+
+        for _ in range(12):
+            await handler._process_monitor_output_line(
+                run_id="run-alert-2",
+                line="FAILED tests/test_example.py::test_case\n",
+            )
+
+        summary = handler._build_status_alert_enrichment(run_id="run-alert-2")
+
+        assert summary["alert_summary"]["total_alerts"] == 1
+        assert summary["alert_summary"]["highest_priority_alerts"][0][
+            "pattern_name"
+        ] == "failure_rate_spike"
 
 
 # ---------------------------------------------------------------------------

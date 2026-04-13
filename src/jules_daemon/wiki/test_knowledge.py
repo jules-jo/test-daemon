@@ -141,6 +141,9 @@ class TestKnowledge:
         purpose: One sentence describing what the test does.
         output_format: Short description of how to read the test output
             (counts, log lines, custom format).
+        summary_fields: Ordered tuple of fields that matter most when
+            summarizing status or completion for this test (for example
+            ``("passed", "failed", "iterations_done")``).
         common_failures: Tuple of short failure patterns the test has
             exhibited in past runs. Capped at :data:`_MAX_COMMON_FAILURES`.
         normal_behavior: Description of what a healthy run looks like.
@@ -161,6 +164,7 @@ class TestKnowledge:
     command_pattern: str
     purpose: str = ""
     output_format: str = ""
+    summary_fields: tuple[str, ...] = field(default_factory=tuple)
     common_failures: tuple[str, ...] = field(default_factory=tuple)
     normal_behavior: str = ""
     required_args: tuple[str, ...] = field(default_factory=tuple)
@@ -190,6 +194,10 @@ class TestKnowledge:
             lines.append(f"- Purpose: {self.purpose}")
         if self.output_format:
             lines.append(f"- Output format: {self.output_format}")
+        if self.summary_fields:
+            lines.append(
+                f"- Summary fields: {', '.join(self.summary_fields)}"
+            )
         if self.normal_behavior:
             lines.append(f"- Normal behavior: {self.normal_behavior}")
         if self.required_args:
@@ -438,6 +446,7 @@ def _knowledge_to_frontmatter(knowledge: TestKnowledge) -> dict[str, Any]:
         "command_pattern": knowledge.command_pattern,
         "purpose": knowledge.purpose,
         "output_format": knowledge.output_format,
+        "summary_fields": list(knowledge.summary_fields),
         "normal_behavior": knowledge.normal_behavior,
         "required_args": list(knowledge.required_args),
         "common_failures": list(knowledge.common_failures),
@@ -513,6 +522,7 @@ def _frontmatter_to_knowledge(fm: dict[str, Any]) -> TestKnowledge:
         command_pattern=command_pattern,
         purpose=_coerce_string(fm.get("purpose")),
         output_format=_coerce_string(fm.get("output_format")),
+        summary_fields=_coerce_required_args(fm.get("summary_fields")),
         normal_behavior=_coerce_string(fm.get("normal_behavior")),
         required_args=_coerce_required_args(fm.get("required_args")),
         common_failures=_coerce_failures(fm.get("common_failures")),
@@ -551,6 +561,14 @@ def _build_body(knowledge: TestKnowledge) -> str:
             knowledge.output_format,
             "",
         ])
+    if knowledge.summary_fields:
+        lines.extend([
+            "## Summary Fields",
+            "",
+        ])
+        for field_name in knowledge.summary_fields:
+            lines.append(f"- `{field_name}`")
+        lines.append("")
     if knowledge.normal_behavior:
         lines.extend([
             "## Normal Behavior",
@@ -700,6 +718,9 @@ def merge_knowledge(
     """
     new_purpose = _coerce_string(new_observations.get("purpose"))
     new_format = _coerce_string(new_observations.get("output_format"))
+    new_summary_fields = _coerce_required_args(
+        new_observations.get("summary_fields")
+    )
     new_normal = _coerce_string(new_observations.get("normal_behavior"))
     new_failures = _coerce_failures(new_observations.get("common_failures"))
 
@@ -714,6 +735,7 @@ def merge_knowledge(
             command_pattern=command_pattern,
             purpose=new_purpose,
             output_format=new_format,
+            summary_fields=new_summary_fields,
             normal_behavior=new_normal,
             common_failures=new_failures,
             runs_observed=1,
@@ -731,6 +753,7 @@ def merge_knowledge(
         existing,
         purpose=existing.purpose or new_purpose,
         output_format=existing.output_format or new_format,
+        summary_fields=existing.summary_fields or new_summary_fields,
         normal_behavior=existing.normal_behavior or new_normal,
         common_failures=tuple(merged_failures),
         runs_observed=existing.runs_observed + 1,

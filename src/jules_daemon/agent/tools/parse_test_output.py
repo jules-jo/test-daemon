@@ -41,6 +41,84 @@ __all__ = ["ParseTestOutputTool"]
 
 logger = logging.getLogger(__name__)
 
+_SUMMARY_FIELD_ORDER: tuple[str, ...] = (
+    "passed",
+    "failed",
+    "skipped",
+    "error",
+    "incomplete",
+)
+
+
+def _empty_summary() -> dict[str, int]:
+    """Return the canonical empty test summary shape."""
+    return {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "error": 0,
+        "incomplete": 0,
+    }
+
+
+def _coerce_summary_fields(raw_value: Any) -> tuple[str, ...]:
+    """Validate and normalize optional summary_fields input."""
+    if raw_value is None:
+        return ()
+    if isinstance(raw_value, str) or not isinstance(raw_value, (list, tuple)):
+        raise ValueError("summary_fields must be an array of non-empty strings")
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in raw_value:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                "summary_fields must be an array of non-empty strings"
+            )
+        field = value.strip()
+        if field in seen:
+            continue
+        seen.add(field)
+        normalized.append(field)
+    return tuple(normalized)
+
+
+def _build_result_data(
+    *,
+    records_data: list[dict[str, Any]],
+    truncated: bool,
+    framework: str,
+    total_lines_parsed: int,
+    summary: dict[str, int],
+    summary_fields: tuple[str, ...],
+) -> dict[str, Any]:
+    """Build the JSON-serializable tool result payload."""
+    result_data: dict[str, Any] = {
+        "records": records_data,
+        "truncated": truncated,
+        "framework": framework,
+        "total_lines_parsed": total_lines_parsed,
+        "summary": summary,
+    }
+
+    if not summary_fields:
+        return result_data
+
+    focused_summary: dict[str, int] = {}
+    unmapped_summary_fields: list[str] = []
+    for field in summary_fields:
+        if field in _SUMMARY_FIELD_ORDER:
+            focused_summary[field] = int(summary.get(field, 0) or 0)
+        else:
+            unmapped_summary_fields.append(field)
+
+    result_data["summary_fields"] = list(summary_fields)
+    if focused_summary:
+        result_data["focused_summary"] = focused_summary
+    if unmapped_summary_fields:
+        result_data["unmapped_summary_fields"] = unmapped_summary_fields
+    return result_data
+
 
 class ParseTestOutputTool(BaseTool):
     """Parse raw test output into structured records.
@@ -72,7 +150,12 @@ class ParseTestOutputTool(BaseTool):
                 "skipped": 0,
                 "error": 0,
                 "incomplete": 0
-            }
+            },
+            "focused_summary": {
+                "failed": 1,
+                "passed": 5
+            },
+            "unmapped_summary_fields": ["iterations_done"]
         }
     """
 
@@ -102,6 +185,17 @@ class ParseTestOutputTool(BaseTool):
                 default="auto",
                 enum=("auto", "pytest", "jest", "go_test", "unknown"),
             ),
+            ToolParam(
+                name="summary_fields",
+                description=(
+                    "Optional ordered list of summary fields from "
+                    "lookup_test_spec. Known fields are returned in "
+                    "focused_summary; unknown fields are reported in "
+                    "unmapped_summary_fields."
+                ),
+                json_type="array",
+                required=False,
+            ),
         ),
         approval=ApprovalRequirement.NONE,
     )
@@ -122,6 +216,16 @@ class ParseTestOutputTool(BaseTool):
         """
         raw_output = args.get("raw_output", "")
         framework_hint = args.get("framework_hint", "auto")
+        try:
+            summary_fields = _coerce_summary_fields(args.get("summary_fields"))
+        except ValueError as exc:
+            return ToolResult(
+                call_id=args.get("_call_id", "parse_test_output"),
+                tool_name=self.name,
+                status=ToolResultStatus.ERROR,
+                output="",
+                error_message=str(exc),
+            )
         call_id = args.get("_call_id", "parse_test_output")
 
         if not raw_output:
@@ -129,19 +233,14 @@ class ParseTestOutputTool(BaseTool):
                 call_id=call_id,
                 tool_name=self.name,
                 status=ToolResultStatus.SUCCESS,
-                output=json.dumps({
-                    "records": [],
-                    "truncated": False,
-                    "framework": "unknown",
-                    "total_lines_parsed": 0,
-                    "summary": {
-                        "passed": 0,
-                        "failed": 0,
-                        "skipped": 0,
-                        "error": 0,
-                        "incomplete": 0,
-                    },
-                }),
+                output=json.dumps(_build_result_data(
+                    records_data=[],
+                    truncated=False,
+                    framework="unknown",
+                    total_lines_parsed=0,
+                    summary=_empty_summary(),
+                    summary_fields=summary_fields,
+                )),
             )
 
         try:
@@ -174,19 +273,20 @@ class ParseTestOutputTool(BaseTool):
                 for r in parse_result.records
             ]
 
-            result_data = {
-                "records": records_data,
-                "truncated": parse_result.truncated,
-                "framework": parse_result.framework_hint.value,
-                "total_lines_parsed": parse_result.total_lines_parsed,
-                "summary": {
+            result_data = _build_result_data(
+                records_data=records_data,
+                truncated=parse_result.truncated,
+                framework=parse_result.framework_hint.value,
+                total_lines_parsed=parse_result.total_lines_parsed,
+                summary={
                     "passed": parse_result.passed_count,
                     "failed": parse_result.failed_count,
                     "skipped": parse_result.skipped_count,
                     "error": parse_result.error_count,
                     "incomplete": parse_result.incomplete_count,
                 },
-            }
+                summary_fields=summary_fields,
+            )
 
             return ToolResult(
                 call_id=call_id,

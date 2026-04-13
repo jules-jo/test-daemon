@@ -245,6 +245,60 @@ class TestReadOutputWikiSource:
 
 
 # ---------------------------------------------------------------------------
+# Live source
+# ---------------------------------------------------------------------------
+
+
+class TestReadOutputLiveSource:
+    """Verify live source reads the daemon's buffered output snapshot."""
+
+    @pytest.mark.asyncio
+    async def test_reads_live_output_snapshot(self, wiki_root: Path) -> None:
+        """source='live' should return the injected live output snapshot."""
+        tool = ReadOutputTool(
+            wiki_root=wiki_root,
+            live_output_provider=lambda last_n: {
+                "source": "live",
+                "status": "running",
+                "run_id": "run-live-123",
+                "task_running": True,
+                "last_n": last_n,
+                "returned_count": 2,
+                "total_buffered_lines": 4,
+                "last_output_line": "tests/test_b.py::test_two FAILED",
+                "lines": [
+                    "tests/test_a.py::test_one PASSED\n",
+                    "tests/test_b.py::test_two FAILED\n",
+                ],
+            },
+        )
+
+        result = await tool.execute(
+            call_id="live-1", args={"source": "live", "last_n": 2}
+        )
+
+        assert result.status == ToolResultStatus.SUCCESS
+        data = json.loads(result.output)
+        assert data["source"] == "live"
+        assert data["status"] == "running"
+        assert data["run_id"] == "run-live-123"
+        assert data["last_n"] == 2
+        assert data["returned_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_live_source_requires_provider(self, wiki_root: Path) -> None:
+        """source='live' should error when no live provider is configured."""
+        tool = ReadOutputTool(wiki_root=wiki_root)
+
+        result = await tool.execute(
+            call_id="live-2", args={"source": "live"}
+        )
+
+        assert result.status == ToolResultStatus.ERROR
+        assert "live_output_provider" in (result.error_message or "")
+
+
+# ---------------------------------------------------------------------------
 # Session source
 # ---------------------------------------------------------------------------
 
