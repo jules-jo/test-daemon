@@ -284,6 +284,26 @@ class TestBuildRunRequest:
         )
         assert envelope.payload["key_path"] == "/home/deploy/.ssh/id_rsa"
 
+    def test_run_request_with_system_name(self):
+        envelope = build_run_request(
+            natural_language="run the unit tests",
+            system_name="tuto",
+        )
+        _assert_valid_envelope(envelope, "run")
+        assert envelope.payload["system_name"] == "tuto"
+        assert "target_host" not in envelope.payload
+
+    def test_run_request_rejects_missing_target_selection(self):
+        with pytest.raises(ValueError, match="exactly one of target or system_name"):
+            build_run_request(natural_language="run the unit tests")
+
+    def test_run_request_rejects_empty_system_name(self):
+        with pytest.raises(ValueError, match="system_name must not be empty"):
+            build_run_request(
+                natural_language="run the unit tests",
+                system_name="   ",
+            )
+
 
 # ---------------------------------------------------------------------------
 # Watch request

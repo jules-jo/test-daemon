@@ -33,6 +33,7 @@ Directory structure:
       architecture/                  # User-managed: architecture notes
       concepts/                      # User-managed: general concepts
       security/                      # User-managed: security notes
+      systems/                       # User-managed: named SSH target aliases
       tools-and-sdks/                # User-managed: tool documentation
     raw/                             # User-managed: unprocessed research notes
     schema/                          # User-managed: schema documentation
@@ -228,6 +229,11 @@ USER_MANAGED_DIRS: tuple[WikiDirectory, ...] = (
         relative_path="pages/security",
         kind=DirectoryKind.USER_MANAGED,
         description="Security notes, audits, and patterns",
+    ),
+    WikiDirectory(
+        relative_path="pages/systems",
+        kind=DirectoryKind.USER_MANAGED,
+        description="Named system definitions for SSH target aliases",
     ),
     WikiDirectory(
         relative_path="pages/tools-and-sdks",

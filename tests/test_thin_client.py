@@ -452,6 +452,24 @@ class TestThinClientRun:
         assert result.success is True
 
     @pytest.mark.asyncio
+    async def test_run_with_system_name(self):
+        """Named systems can be sent without an explicit SSH target."""
+        response = _make_response("run", extra={"run_id": "run-new-002"})
+        conn = _make_mock_connection(responses=[response])
+
+        client = ThinClient()
+        with patch.object(client, "_create_connection", return_value=conn):
+            result = await client.run(
+                natural_language="run unit tests in system tuto",
+                system_name="tuto",
+            )
+
+        assert result.success is True
+        sent = conn.send.call_args_list[0][0][0]
+        assert sent.payload["system_name"] == "tuto"
+        assert "target_host" not in sent.payload
+
+    @pytest.mark.asyncio
     async def test_run_with_confirmation_approved(self):
         """Daemon sends CONFIRM_PROMPT, user approves, daemon responds."""
         prompt = _make_confirm_prompt(command="pytest -v")
@@ -545,6 +563,17 @@ class TestThinClientRun:
             natural_language="",  # invalid
         )
         assert result.success is False
+
+    @pytest.mark.asyncio
+    async def test_run_rejects_system_name_with_explicit_target(self):
+        client = ThinClient()
+        result = await client.run(
+            natural_language="run tests",
+            system_name="tuto",
+            target_host="ci.example.com",
+        )
+        assert result.success is False
+        assert "system_name cannot be combined" in result.rendered
 
     @pytest.mark.asyncio
     async def test_run_timeout_during_confirmation(self):

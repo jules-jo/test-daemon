@@ -394,6 +394,30 @@ def _validate_run_fields(
     """
     parsed: dict[str, Any] = {}
 
+    nl = _require_non_empty_string(payload, "natural_language", errors)
+    if nl is not None:
+        parsed["natural_language"] = nl
+
+    system_name = _validate_optional_non_empty_string(payload, "system_name", errors)
+    if system_name is not None:
+        parsed["system_name"] = system_name
+
+        conflicting_fields = [
+            field_name
+            for field_name in ("target_host", "target_user", "target_port", "key_path")
+            if payload.get(field_name) is not None
+        ]
+        if conflicting_fields:
+            errors.append(ValidationError(
+                field="system_name",
+                message=(
+                    "'system_name' cannot be combined with explicit target "
+                    f"fields: {', '.join(conflicting_fields)}"
+                ),
+                code="conflicting_fields",
+            ))
+        return parsed
+
     host = _require_non_empty_string(payload, "target_host", errors)
     if host is not None:
         parsed["target_host"] = host
@@ -401,10 +425,6 @@ def _validate_run_fields(
     user = _require_non_empty_string(payload, "target_user", errors)
     if user is not None:
         parsed["target_user"] = user
-
-    nl = _require_non_empty_string(payload, "natural_language", errors)
-    if nl is not None:
-        parsed["natural_language"] = nl
 
     parsed["target_port"] = _validate_port(payload, "target_port", errors)
 

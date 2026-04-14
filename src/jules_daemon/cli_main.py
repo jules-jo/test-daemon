@@ -11,6 +11,7 @@ Usage::
 
     # Single command mode
     jules status
+    jules "run the smoke tests on deploy@staging"
     jules run deploy@staging run the smoke tests
     jules watch --follow
     jules history --limit 10
@@ -20,12 +21,14 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import difflib
 import sys
 from pathlib import Path
 
 from jules_daemon.classifier.classify import classify
-from jules_daemon.classifier.models import InputType
+from jules_daemon.classifier.models import ClassificationResult, InputType
+from jules_daemon.classifier.nl_extractor import extract_from_natural_language
 from jules_daemon.ipc.framing import MessageEnvelope
 from jules_daemon.thin_client.client import ThinClient, ThinClientConfig
 from jules_daemon.thin_client.renderer import render_confirm_prompt
@@ -65,6 +68,16 @@ _FUZZY_CUTOFF: float = 0.6
 # language interpretation. Matches the classifier's own internal
 # threshold for "confident" results.
 _CLASSIFIER_CONFIDENCE_THRESHOLD: float = 0.7
+_RUN_CLASSIFIER_CONFIDENCE_THRESHOLD: float = 0.5
+
+
+@dataclass(frozen=True)
+class _ResolvedInput:
+    """Resolved CLI input ready for thin-client dispatch."""
+
+    parts: tuple[str, ...] | None
+    hint: str | None = None
+    error: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -228,37 +241,64 @@ async def _execute_single(
         )
 
     elif verb == "run":
-        # Parse: run user@host <natural language description>
+        # Parse:
+        #   run user@host <natural language description>
+        #   run --system <name> <natural language description>
         if not remaining:
             print("Usage: jules run user@host <description>")
+            print("   or: jules run --system <name> <description>")
             return 1
 
-        target_spec = remaining[0]
-        nl_parts = remaining[1:]
+        if remaining[0] == "--system" or remaining[0].startswith("--system="):
+            if remaining[0] == "--system":
+                if len(remaining) < 3:
+                    print("Usage: jules run --system <name> <description>")
+                    return 1
+                system_name = remaining[1].strip()
+                nl_parts = remaining[2:]
+            else:
+                _, _, system_name = remaining[0].partition("=")
+                if not system_name.strip() or len(remaining) < 2:
+                    print("Usage: jules run --system <name> <description>")
+                    return 1
+                nl_parts = remaining[1:]
 
-        if "@" not in target_spec:
-            print("Error: target must be in user@host format")
-            return 1
+            if not nl_parts:
+                print("Error: natural language description required")
+                return 1
 
-        user, host_part = target_spec.split("@", 1)
-        port = 22
-        if ":" in host_part:
-            host, port_str = host_part.rsplit(":", 1)
-            port = int(port_str)
+            natural_language = " ".join(nl_parts)
+            result = await client.run(
+                natural_language=natural_language,
+                system_name=system_name,
+            )
         else:
-            host = host_part
+            target_spec = remaining[0]
+            nl_parts = remaining[1:]
 
-        if not nl_parts:
-            print("Error: natural language description required")
-            return 1
+            if "@" not in target_spec:
+                print("Error: target must be in user@host format")
+                return 1
 
-        natural_language = " ".join(nl_parts)
-        result = await client.run(
-            target_host=host,
-            target_user=user,
-            natural_language=natural_language,
-            target_port=port,
-        )
+            user, host_part = target_spec.split("@", 1)
+            port = 22
+            if ":" in host_part:
+                host, port_str = host_part.rsplit(":", 1)
+                port = int(port_str)
+            else:
+                host = host_part
+
+            if not nl_parts:
+                print("Error: natural language description required")
+                return 1
+
+            natural_language = " ".join(nl_parts)
+            result = await client.run(
+                target_host=host,
+                target_user=user,
+                natural_language=natural_language,
+                target_port=port,
+            )
 
     elif verb == "discover":
         # discover user@host command [args...]
@@ -358,86 +398,218 @@ def _fuzzy_match_verb(first_word: str) -> str | None:
     return None
 
 
-def _classify_natural_language(raw: str) -> str | None:
-    """Ask the pattern-based classifier to interpret natural language.
+def _classify_interpreted_input(raw: str) -> ClassificationResult | None:
+    """Classify free-form input and return a trusted result object.
 
-    Delegates to the existing deterministic ``classify()`` entry point
-    (no LLM calls) and accepts the result only when the classifier
-    reports a confident, non-ambiguous interpretation. The confidence
-    gate matches the classifier's own internal "is confident" threshold
-    so that borderline guesses are rejected rather than silently
-    reinterpreting user input.
-
-    TODO(future): Swap to LLM-based classification for more robust
-    natural language understanding. The current pattern-based classifier
-    is brittle -- only pre-written keyword phrases work ("what's running"
-    matches, but "are the tests done yet?" won't). To upgrade, replace
-    the body of this function with a call to the Dataiku Mesh LLM that
-    returns the canonical verb. The signature stays the same -- no
-    other code in the CLI needs to change. Consider caching recent
-    classifications to reduce LLM calls for repeated queries.
-
-    Args:
-        raw: The raw, stripped user input string.
-
-    Returns:
-        The canonical verb string when the classifier is confident,
-        otherwise ``None`` so the caller can emit an ``Unknown
-        command`` error.
+    Accepts the general confidence threshold for most verbs, but uses a
+    slightly lower threshold for ``run`` because the heuristic extractor
+    intentionally assigns simple run requests scores around 0.5-0.6.
     """
     result = classify(raw)
     if result.input_type == InputType.AMBIGUOUS:
         return None
-    if result.confidence_score < _CLASSIFIER_CONFIDENCE_THRESHOLD:
+    if result.confidence_score >= _CLASSIFIER_CONFIDENCE_THRESHOLD:
+        return result
+    if (
+        result.canonical_verb == "run"
+        and result.confidence_score >= _RUN_CLASSIFIER_CONFIDENCE_THRESHOLD
+    ):
+        return result
+    return None
+
+
+def _extract_natural_language_run(raw: str) -> dict[str, object] | None:
+    """Force the NL extractor for conversational run requests.
+
+    This avoids the structured classifier path misclassifying inputs like
+    ``run the smoke tests on deploy@staging`` as verb-style commands.
+    """
+    extraction = extract_from_natural_language(raw)
+    if extraction.canonical_verb != "run":
         return None
-    return result.canonical_verb
+    if extraction.confidence < _RUN_CLASSIFIER_CONFIDENCE_THRESHOLD:
+        return None
+    return dict(extraction.extracted_args)
+
+
+def _looks_like_structured_run(parts: list[str]) -> bool:
+    """Return True when argv already matches the explicit ``run`` syntax."""
+    if len(parts) < 2:
+        return False
+    if "@" in parts[1]:
+        return True
+    if parts[1] == "--system":
+        return len(parts) >= 4 and bool(parts[2].strip())
+    if parts[1].startswith("--system="):
+        return len(parts) >= 3 and bool(parts[1].partition("=")[2].strip())
+    return False
+
+
+def _parse_target_spec(target_spec: str) -> tuple[str, str, int] | str:
+    """Parse ``user@host[:port]`` into structured SSH target fields."""
+    if "@" not in target_spec:
+        return "target must be in user@host[:port] format"
+
+    user, host_part = target_spec.split("@", 1)
+    if not user.strip():
+        return "target user must not be empty"
+
+    host = host_part
+    port = 22
+    if ":" in host_part:
+        host, port_str = host_part.rsplit(":", 1)
+        if not port_str:
+            return "target port must not be empty"
+        try:
+            port = int(port_str)
+        except ValueError:
+            return f"target port must be numeric, got {port_str!r}"
+
+    if not host.strip():
+        return "target host must not be empty"
+    if not (1 <= port <= 65535):
+        return f"target port must be 1-65535, got {port}"
+    return user.strip(), host.strip(), port
+
+
+def _format_target_spec(user: str, host: str, port: int) -> str:
+    """Format SSH target fields back into ``user@host[:port]``."""
+    if port == 22:
+        return f"{user}@{host}"
+    return f"{user}@{host}:{port}"
+
+
+def _prompt_for_target() -> tuple[str, str, int] | None:
+    """Interactively ask for a missing SSH target."""
+    print("A run request needs an SSH target.")
+    while True:
+        try:
+            raw = input("Target (user@host[:port], or 'skip' to cancel): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+
+        if not raw or raw.lower() == "skip":
+            return None
+
+        parsed = _parse_target_spec(raw)
+        if isinstance(parsed, str):
+            print(f"Error: {parsed}")
+            continue
+        return parsed
+
+
+def _resolve_natural_language_run(
+    raw: str,
+    extracted_args: dict[str, object],
+    *,
+    allow_prompt: bool,
+) -> _ResolvedInput:
+    """Resolve a natural-language run request into explicit argv tokens."""
+    target_user = extracted_args.get("target_user")
+    target_host = extracted_args.get("target_host")
+    system_name = extracted_args.get("system_name")
+    raw_port = extracted_args.get("target_port", 22)
+
+    if isinstance(target_user, str) and isinstance(target_host, str):
+        try:
+            port = int(raw_port)
+        except (TypeError, ValueError):
+            port = 22
+        target_spec = _format_target_spec(
+            target_user.strip(),
+            target_host.strip(),
+            port,
+        )
+        return _ResolvedInput(
+            parts=("run", target_spec, raw),
+            hint="(interpreted as 'run')",
+        )
+
+    if isinstance(system_name, str) and system_name.strip():
+        return _ResolvedInput(
+            parts=("run", "--system", system_name.strip(), raw),
+            hint="(interpreted as 'run')",
+        )
+
+    if not allow_prompt:
+        return _ResolvedInput(
+            parts=None,
+            error=(
+                "Natural-language run requests must include either an SSH target "
+                "like user@host[:port] or a named system like 'in system tuto'."
+            ),
+        )
+
+    prompted = _prompt_for_target()
+    if prompted is None:
+        return _ResolvedInput(parts=None, error="Run cancelled.")
+
+    user, host, port = prompted
+    return _ResolvedInput(
+        parts=("run", _format_target_spec(user, host, port), raw),
+        hint="(interpreted as 'run')",
+    )
 
 
 def _resolve_verb(raw: str) -> tuple[list[str], str | None] | None:
-    """Resolve raw REPL input into command parts via a 3-layer lookup.
+    """Compatibility wrapper around ``_resolve_input`` for non-interactive use."""
+    resolved = _resolve_input(raw, allow_prompt=False)
+    if resolved.parts is None:
+        return None
+    return list(resolved.parts), resolved.hint
 
-    The resolver never calls the network or the LLM. It runs three
-    progressively more forgiving layers:
 
-    1. Exact match: if the first token is already a known verb, the
-       original ``raw.split()`` tokens are returned unchanged and no
-       hint is emitted.
-    2. Fuzzy match: the first token is compared against the known
-       verbs with ``difflib``; a close match replaces only the first
-       token (preserving remaining ``run`` arguments such as the
-       ``user@host`` target and free-form command description) and a
-       subtle hint is emitted so the user sees how the input was
-       rewritten.
-    3. Classifier fallback: the full raw input is passed to the
-       pattern-based classifier, which resolves natural language like
-       ``"what's running?"`` or ``"kill the test"`` to a canonical
-       verb. Any extracted arguments are dropped here because
-       ``_execute_single`` relies on positional ``argv`` tokens; when
-       the classifier picks a verb that requires arguments (such as
-       ``run``), dispatch will surface the normal usage error.
+def _resolve_input(
+    raw: str,
+    *,
+    allow_prompt: bool,
+) -> _ResolvedInput:
+    """Resolve raw CLI input into dispatchable argv tokens.
 
-    Args:
-        raw: The stripped, non-empty REPL input line.
-
-    Returns:
-        A ``(parts, hint)`` tuple suitable for passing to
-        ``_execute_single``, where ``hint`` is an optional one-line
-        interpretation message to print before dispatch, or ``None``
-        when the input cannot be resolved and the caller should emit
-        an ``Unknown command`` error.
+    Structured commands pass through unchanged. Bare natural-language run
+    requests are rewritten into the existing explicit ``run`` syntax so the
+    rest of the thin client can stay unchanged.
     """
     parts = raw.split()
     if not parts:
-        return None
+        return _ResolvedInput(parts=None, error="Empty input.")
 
     first_word = parts[0].lower()
 
-    # Layer 1: exact match against the known verb set. We intentionally
-    # do not lower-case the rest of the tokens -- "run" arguments such
-    # as natural-language test descriptions must preserve their
-    # original casing.
+    # Layer 1: exact match against the known verb set. Keep the explicit
+    # syntax for structured commands, but let conversational ``run ...``
+    # input fall through to NL resolution when the target token is missing.
     if first_word in _KNOWN_VERBS:
-        return parts, None
+        if first_word != "run" or _looks_like_structured_run(parts):
+            return _ResolvedInput(parts=tuple(parts))
+        extracted_args = _extract_natural_language_run(raw)
+        if extracted_args is None:
+            return _ResolvedInput(
+                parts=None,
+                error=(
+                    "Run requests must include an SSH target like user@host[:port]. "
+                    "Example: run the smoke tests on deploy@staging"
+                ),
+            )
+        return _resolve_natural_language_run(
+            raw,
+            extracted_args,
+            allow_prompt=allow_prompt,
+        )
+
+    interpreted = _classify_interpreted_input(raw)
+    if interpreted is not None and interpreted.input_type != InputType.COMMAND:
+        if interpreted.canonical_verb == "run":
+            return _resolve_natural_language_run(
+                raw,
+                dict(interpreted.extracted_args),
+                allow_prompt=allow_prompt,
+            )
+        return _ResolvedInput(
+            parts=(interpreted.canonical_verb,),
+            hint=f"(interpreted as '{interpreted.canonical_verb}')",
+        )
 
     # Layer 2: fuzzy match to correct typos. Only the first token is
     # rewritten; the remaining tokens (e.g., ``user@host`` targets and
@@ -445,17 +617,38 @@ def _resolve_verb(raw: str) -> tuple[list[str], str | None] | None:
     fuzzy_verb = _fuzzy_match_verb(first_word)
     if fuzzy_verb is not None:
         corrected = [fuzzy_verb, *parts[1:]]
-        return corrected, f"(interpreted as '{fuzzy_verb}')"
+        if fuzzy_verb == "run" and not _looks_like_structured_run(corrected):
+            extracted_args = _extract_natural_language_run(raw)
+            if extracted_args is not None:
+                return _resolve_natural_language_run(
+                    raw,
+                    extracted_args,
+                    allow_prompt=allow_prompt,
+                )
+        return _ResolvedInput(
+            parts=tuple(corrected),
+            hint=f"(interpreted as '{fuzzy_verb}')",
+        )
 
     # Layer 3: classifier fallback for natural language. When the
-    # classifier is confident we dispatch with just the canonical verb
-    # -- extracted args are not threaded through because the current
-    # ``_execute_single`` dispatcher parses positional argv tokens.
-    classified_verb = _classify_natural_language(raw)
-    if classified_verb is not None:
-        return [classified_verb], f"(interpreted as '{classified_verb}')"
+    # classifier is confident we dispatch to the canonical verb. ``run``
+    # is special because it needs both a target and the original free-form
+    # prompt text.
+    interpreted = _classify_interpreted_input(raw)
+    if interpreted is None:
+        return _ResolvedInput(parts=None, error=f"Unknown command: {first_word}")
 
-    return None
+    if interpreted.canonical_verb == "run":
+        return _resolve_natural_language_run(
+            raw,
+            dict(interpreted.extracted_args),
+            allow_prompt=allow_prompt,
+        )
+
+    return _ResolvedInput(
+        parts=(interpreted.canonical_verb,),
+        hint=f"(interpreted as '{interpreted.canonical_verb}')",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -496,19 +689,17 @@ async def _repl(client: ThinClient) -> int:
             _print_help()
             continue
 
-        resolved = _resolve_verb(raw)
-        if resolved is None:
-            first_word = raw.split()[0]
-            print(f"Unknown command: {first_word}")
+        resolved = _resolve_input(raw, allow_prompt=True)
+        if resolved.parts is None:
+            print(resolved.error or "Unknown command")
             print("Try 'help' to see available commands")
             print()
             continue
 
-        parts, hint = resolved
-        if hint is not None:
-            print(hint)
+        if resolved.hint is not None:
+            print(resolved.hint)
 
-        exit_code = await _execute_single(client, parts)
+        exit_code = await _execute_single(client, list(resolved.parts))
         if exit_code != 0:
             print(f"(exit code: {exit_code})")
         print()
@@ -522,6 +713,11 @@ def _print_help() -> None:
     print("  status [--verbose]            Query current run state")
     print("  watch [--run-id ID] [--tail N] Stream output from a run")
     print("  run user@host description     Start a test execution")
+    print("  run --system NAME description Start a test execution via system alias")
+    print("  run the smoke tests on deploy@staging")
+    print("                                Natural-language run request")
+    print("  run the smoke tests in system tuto")
+    print("                                Natural-language run request via system alias")
     print("  discover user@host command    Auto-discover test spec via -h")
     print("  cancel [--force] [--run-id ID] Cancel a run")
     print("  history [--limit N] [--status S] View past results")
@@ -554,7 +750,13 @@ async def _async_main(args: list[str], socket_path: Path | None) -> int:
     )
 
     if args:
-        return await _execute_single(client, args)
+        resolved = _resolve_input(" ".join(args), allow_prompt=sys.stdin.isatty())
+        if resolved.parts is None:
+            print(resolved.error or "Unknown command")
+            return 1
+        if resolved.hint is not None:
+            print(resolved.hint)
+        return await _execute_single(client, list(resolved.parts))
     return await _repl(client)
 
 

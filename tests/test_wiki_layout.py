@@ -147,6 +147,10 @@ class TestWikiLayoutConstants:
         paths = {d.relative_path for d in USER_MANAGED_DIRS}
         assert "pages/agents" in paths
 
+    def test_user_dirs_include_systems(self) -> None:
+        paths = {d.relative_path for d in USER_MANAGED_DIRS}
+        assert "pages/systems" in paths
+
     def test_all_paths_are_relative(self) -> None:
         all_dirs = DAEMON_MANAGED_DIRS + USER_MANAGED_DIRS
         for d in all_dirs:

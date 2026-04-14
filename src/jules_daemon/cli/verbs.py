@@ -211,32 +211,47 @@ class RunArgs:
         target_user: SSH username on the remote host.
         natural_language: Free-form description of what tests to run
             (e.g., "run the full regression suite for payments").
+        system_name: Optional named system alias defined in the wiki.
+            When provided, the daemon resolves host/user/port from
+            ``wiki/pages/systems`` and explicit target fields must be empty.
         target_port: SSH port on the remote host. Default is 22.
         key_path: Absolute path to the SSH private key file.
             None means use the SSH agent or default key.
     """
 
-    target_host: str
-    target_user: str
-    natural_language: str
+    target_host: str = ""
+    target_user: str = ""
+    natural_language: str = ""
+    system_name: Optional[str] = None
     target_port: int = 22
     key_path: Optional[str] = None
 
     def __post_init__(self) -> None:
-        if not self.target_host.strip():
-            raise ValueError("target_host must not be empty")
-        if not self.target_user.strip():
-            raise ValueError("target_user must not be empty")
         if not self.natural_language.strip():
             raise ValueError("natural_language must not be empty")
-        if not (1 <= self.target_port <= 65535):
-            raise ValueError(
-                f"target_port must be 1-65535, got {self.target_port}"
-            )
-        if self.key_path is not None and not self.key_path.startswith("/"):
-            raise ValueError(
-                f"key_path must be an absolute path, got {self.key_path!r}"
-            )
+        has_system_name = self.system_name is not None and self.system_name.strip() != ""
+        if has_system_name:
+            if self.target_host.strip() or self.target_user.strip():
+                raise ValueError(
+                    "system_name cannot be combined with target_host or target_user"
+                )
+            if self.target_port != 22:
+                raise ValueError("system_name cannot be combined with target_port")
+            if self.key_path is not None:
+                raise ValueError("system_name cannot be combined with key_path")
+        else:
+            if not self.target_host.strip():
+                raise ValueError("target_host must not be empty")
+            if not self.target_user.strip():
+                raise ValueError("target_user must not be empty")
+            if not (1 <= self.target_port <= 65535):
+                raise ValueError(
+                    f"target_port must be 1-65535, got {self.target_port}"
+                )
+            if self.key_path is not None and not self.key_path.startswith("/"):
+                raise ValueError(
+                    f"key_path must be an absolute path, got {self.key_path!r}"
+                )
 
     def to_ssh_target(self) -> SSHTarget:
         """Convert to an SSHTarget for use with the wiki persistence layer.
@@ -244,6 +259,8 @@ class RunArgs:
         Returns:
             SSHTarget with matching host, user, port, and key_path.
         """
+        if self.system_name is not None and self.system_name.strip():
+            raise ValueError("Cannot build SSHTarget until system_name is resolved")
         return SSHTarget(
             host=self.target_host,
             user=self.target_user,

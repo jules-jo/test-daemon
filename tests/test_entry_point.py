@@ -347,6 +347,66 @@ class TestAliasCommandDispatch:
 
 
 # ---------------------------------------------------------------------------
+# Natural-language dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestNaturalLanguageDispatch:
+    """Tests for processing conversational input without explicit verbs."""
+
+    @pytest.mark.asyncio
+    async def test_polite_run_request_with_target(
+        self,
+        full_registry: CommandHandlerRegistry,
+        full_dispatcher: CommandDispatcher,
+    ) -> None:
+        result = await process_input(
+            "can you run the smoke tests on ci@staging?",
+            registry=full_registry,
+            dispatcher=full_dispatcher,
+        )
+        assert result.success is True
+        assert result.dispatch_response is not None
+        assert result.dispatch_response.verb == Verb.RUN
+        assert result.dispatch_response.payload["host"] == "staging"
+        assert result.classification is not None
+        assert result.classification.input_type == InputType.NATURAL_LANGUAGE
+
+    @pytest.mark.asyncio
+    async def test_conversational_run_request_starting_with_run_falls_back_to_nl(
+        self,
+        full_registry: CommandHandlerRegistry,
+        full_dispatcher: CommandDispatcher,
+    ) -> None:
+        result = await process_input(
+            "run the smoke tests on ci@staging",
+            registry=full_registry,
+            dispatcher=full_dispatcher,
+        )
+        assert result.success is True
+        assert result.dispatch_response is not None
+        assert result.dispatch_response.verb == Verb.RUN
+        assert result.dispatch_response.payload["host"] == "staging"
+        assert result.classification is not None
+        assert result.classification.input_type == InputType.NATURAL_LANGUAGE
+
+    @pytest.mark.asyncio
+    async def test_run_request_with_system_alias(
+        self,
+        full_registry: CommandHandlerRegistry,
+        full_dispatcher: CommandDispatcher,
+    ) -> None:
+        result = await process_input(
+            "run the smoke tests in system tuto",
+            registry=full_registry,
+            dispatcher=full_dispatcher,
+        )
+        assert result.success is True
+        assert result.classification is not None
+        assert result.classification.input_type == InputType.NATURAL_LANGUAGE
+
+
+# ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------
 

@@ -428,13 +428,40 @@ def _parse_watch_args(tokens: list[str]) -> WatchArgs | str:
 def _parse_run_args(tokens: list[str]) -> RunArgs | str:
     """Parse arguments for the ``run`` verb.
 
-    Syntax: run user@host[:port] <natural language> [--port N] [--key PATH]
+    Syntax:
+      run user@host[:port] <natural language> [--port N] [--key PATH]
+      run --system NAME <natural language>
     """
     positionals, flags = _split_flags_and_positionals(tokens)
 
-    err = _check_unknown_flags(flags, frozenset({"--port", "--key"}), "run")
+    err = _check_unknown_flags(
+        flags,
+        frozenset({"--port", "--key", "--system"}),
+        "run",
+    )
     if err is not None:
         return err
+
+    try:
+        system_name = _require_flag_value(flags, "--system", "--system")
+    except ValueError as exc:
+        return str(exc)
+
+    if system_name is not None:
+        if "--port" in flags or "--key" in flags:
+            return "--system cannot be combined with --port or --key"
+        if not positionals:
+            return "run requires a natural-language command after --system"
+        if "@" in positionals[0]:
+            return "run cannot combine a user@host target with --system"
+        natural_language = " ".join(positionals)
+        try:
+            return RunArgs(
+                natural_language=natural_language,
+                system_name=system_name,
+            )
+        except ValueError as exc:
+            return str(exc)
 
     parsed = _parse_target_and_nl(positionals, flags, "run")
     if isinstance(parsed, str):

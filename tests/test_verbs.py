@@ -273,6 +273,30 @@ class TestRunArgs:
         assert target.port == 2222
         assert target.key_path == "/home/deploy/.ssh/id_rsa"
 
+    def test_run_args_can_use_system_name(self) -> None:
+        args = RunArgs(
+            natural_language="run tests",
+            system_name="tuto",
+        )
+        assert args.system_name == "tuto"
+
+    def test_system_name_conflicts_with_explicit_target(self) -> None:
+        with pytest.raises(ValueError, match="system_name cannot be combined"):
+            RunArgs(
+                target_host="host",
+                target_user="user",
+                natural_language="run tests",
+                system_name="tuto",
+            )
+
+    def test_to_ssh_target_rejects_unresolved_system_name(self) -> None:
+        args = RunArgs(
+            natural_language="run tests",
+            system_name="tuto",
+        )
+        with pytest.raises(ValueError, match="system_name is resolved"):
+            args.to_ssh_target()
+
 
 # ---------------------------------------------------------------------------
 # QueueArgs

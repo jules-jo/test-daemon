@@ -45,6 +45,7 @@ wiki/
     architecture/                    # User-managed: architecture notes
     concepts/                        # User-managed: general concepts
     security/                        # User-managed: security notes
+    systems/                         # User-managed: named SSH target aliases
     tools-and-sdks/                  # User-managed: tool documentation
   raw/                               # User-managed: unprocessed notes
   schema/                            # User-managed: schema documentation

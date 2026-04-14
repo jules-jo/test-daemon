@@ -377,6 +377,28 @@ class TestValidateRequestRunFields:
         assert result.verb == "run"
         assert result.parsed_payload["target_host"] == "staging.example.com"
 
+    def test_run_valid_with_system_name(self) -> None:
+        envelope = _make_envelope(payload={
+            "verb": "run",
+            "system_name": "tuto",
+            "natural_language": "run smoke tests",
+        })
+        result = validate_request(envelope)
+        assert result.is_valid is True
+        assert result.parsed_payload["system_name"] == "tuto"
+
+    def test_run_system_name_conflicts_with_explicit_target(self) -> None:
+        envelope = _make_envelope(payload={
+            "verb": "run",
+            "system_name": "tuto",
+            "target_host": "staging.example.com",
+            "target_user": "deploy",
+            "natural_language": "run smoke tests",
+        })
+        result = validate_request(envelope)
+        assert result.is_valid is False
+        assert any(e.code == "conflicting_fields" for e in result.errors)
+
     def test_run_with_optional_fields(self) -> None:
         envelope = _make_envelope(payload={
             "verb": "run",

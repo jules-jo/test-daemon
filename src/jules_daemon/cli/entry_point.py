@@ -52,6 +52,7 @@ from typing import Any
 
 from jules_daemon.classifier.classify import classify
 from jules_daemon.classifier.models import ClassificationResult, InputType
+from jules_daemon.classifier.nl_extractor import extract_from_natural_language
 from jules_daemon.cli.args_builder import build_verb_args
 from jules_daemon.cli.dispatcher import CommandDispatcher, DispatchResponse
 from jules_daemon.cli.parser import ParseError, parse_command
@@ -299,6 +300,28 @@ def _build_from_classification(
         return str(exc)
 
 
+def _reclassify_as_natural_language(raw: str) -> ClassificationResult:
+    """Force the NL extractor path for structured-looking conversational input.
+
+    This is used when the structured parser recognizes a verb token but the
+    arguments do not actually fit the structured grammar, for example:
+
+        run the smoke tests on deploy@staging
+    """
+    extraction = extract_from_natural_language(raw)
+    input_type = (
+        InputType.NATURAL_LANGUAGE
+        if extraction.confidence > 0.0
+        else InputType.AMBIGUOUS
+    )
+    return ClassificationResult(
+        canonical_verb=extraction.canonical_verb,
+        extracted_args=dict(extraction.extracted_args),
+        confidence_score=extraction.confidence,
+        input_type=input_type,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Pipeline step: dispatch
 # ---------------------------------------------------------------------------
@@ -392,13 +415,15 @@ async def process_input(
         if classification.input_type == InputType.COMMAND:
             structured_error = build_result
             logger.debug(
-                "Structured parse failed (%s), attempting NL fallback",
+                "Structured parse failed (%s), attempting NL reclassification",
                 structured_error,
             )
-            verb = _CANONICAL_TO_VERB.get(classification.canonical_verb)
+            nl_classification = _reclassify_as_natural_language(raw)
+            verb = _CANONICAL_TO_VERB.get(nl_classification.canonical_verb)
             if verb is not None:
-                nl_result = _build_from_classification(classification, verb)
+                nl_result = _build_from_classification(nl_classification, verb)
                 if not isinstance(nl_result, str):
+                    classification = nl_classification
                     build_result = nl_result
 
     if isinstance(build_result, str):

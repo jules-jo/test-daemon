@@ -55,6 +55,11 @@ class TestRunIntent:
         )
         assert result.canonical_verb == "run"
 
+    def test_run_intent_keeps_original_natural_language(self) -> None:
+        raw = "can you run the smoke tests on ci@staging?"
+        result = extract_from_natural_language(raw)
+        assert result.extracted_args.get("natural_language") == raw
+
 
 class TestStatusIntent:
     """NL inputs that should extract a 'status' intent."""
@@ -195,6 +200,11 @@ class TestQueueIntent:
         )
         assert result.canonical_verb == "queue"
 
+    def test_queue_intent_keeps_original_natural_language(self) -> None:
+        raw = "queue the smoke tests for later on ci@staging"
+        result = extract_from_natural_language(raw)
+        assert result.extracted_args.get("natural_language") == raw
+
 
 class TestSSHTargetExtraction:
     """NL inputs containing SSH targets should extract them."""
@@ -213,6 +223,12 @@ class TestSSHTargetExtraction:
         assert result.extracted_args.get("target_user") == "ci"
         assert result.extracted_args.get("target_host") == "prod"
         assert result.extracted_args.get("target_port") == 2222
+
+    def test_system_alias_reference_is_extracted(self) -> None:
+        result = extract_from_natural_language(
+            "run the smoke tests in system tuto"
+        )
+        assert result.extracted_args.get("system_name") == "tuto"
 
 
 class TestNLExtractionDataclass:

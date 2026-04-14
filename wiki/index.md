@@ -6,7 +6,7 @@ tags:
 - jules-daemon
 type: wiki-index
 created: 2026-04-13
-updated: 2026-04-13
+updated: 2026-04-14
 sources:
 - /workspaces/jules/experiments-codex/jules-agent-loop-rescope-codex/jules-agent-loop-rescope/AGENTS.md
 - /workspaces/jules/experiments-codex/jules-agent-loop-rescope-codex/jules-agent-loop-rescope/wiki/schema/AGENTS.md
@@ -55,6 +55,7 @@ These directories are for user-curated knowledge and notes.
 - **architecture** (`pages/architecture/`) -- Architecture notes and design decisions
 - **concepts** (`pages/concepts/`) -- General concepts and knowledge base
 - **security** (`pages/security/`) -- Security notes, audits, and patterns
+- **systems** (`pages/systems/`) -- Named system definitions for SSH target aliases
 - **tools-and-sdks** (`pages/tools-and-sdks/`) -- Tool and SDK documentation
 - **raw** (`raw/`) -- Unprocessed research notes and raw material
 - **schema** (`schema/`) -- Schema documentation and reference

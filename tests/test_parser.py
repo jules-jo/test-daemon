@@ -305,6 +305,12 @@ class TestParseRun:
         assert isinstance(result, ParsedCommand)
         assert result.args.key_path == "/home/deploy/.ssh/id_rsa"
 
+    def test_run_with_system_name(self) -> None:
+        result = parse_command("run --system tuto run the tests")
+        assert isinstance(result, ParsedCommand)
+        assert result.args.system_name == "tuto"
+        assert result.args.natural_language == "run the tests"
+
     def test_run_with_port_flag(self) -> None:
         result = parse_command("run deploy@host run tests --port 2222")
         assert isinstance(result, ParsedCommand)
@@ -359,6 +365,12 @@ class TestParseRun:
         assert isinstance(result, ParseError)
         assert result.verb == Verb.RUN
         assert "absolute path" in result.message
+
+    def test_run_system_cannot_combine_with_target(self) -> None:
+        result = parse_command("run deploy@host --system tuto run tests")
+        assert isinstance(result, ParseError)
+        assert result.verb == Verb.RUN
+        assert "cannot combine" in result.message
 
     def test_run_natural_language_with_multiple_words(self) -> None:
         result = parse_command(

@@ -210,14 +210,28 @@ def _build_run_args(extracted: dict[str, Any]) -> RunArgs | str:
     """Build RunArgs from an extracted_args dict.
 
     Required fields:
-        target_host (str): Remote hostname.
-        target_user (str): SSH username.
         natural_language (str): What tests to run.
 
     Optional fields:
+        system_name (str): Named system alias defined in the wiki.
+        target_host (str): Remote hostname.
+        target_user (str): SSH username.
         target_port (int): Default 22.
         key_path (str | None): Default None.
     """
+    system_name = _coerce_optional_str(extracted.get("system_name"))
+    if system_name is not None:
+        natural_language = _coerce_optional_str(extracted.get("natural_language"))
+        if natural_language is None:
+            return "Missing required field: natural_language"
+        try:
+            return RunArgs(
+                natural_language=natural_language,
+                system_name=system_name,
+            )
+        except ValueError as exc:
+            return str(exc)
+
     fields = _extract_ssh_nl_fields(extracted)
     if isinstance(fields, str):
         return fields

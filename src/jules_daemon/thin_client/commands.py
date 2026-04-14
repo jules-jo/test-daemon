@@ -231,29 +231,40 @@ def build_cancel_request(
 
 def build_run_request(
     *,
-    target: SSHTargetParams,
+    target: SSHTargetParams | None = None,
     natural_language: str,
+    system_name: str | None = None,
 ) -> MessageEnvelope:
     """Build a run REQUEST envelope.
 
     Args:
         target: SSH target connection parameters.
         natural_language: Free-form description of what tests to run.
+        system_name: Named system alias defined in ``wiki/pages/systems``.
 
     Returns:
         MessageEnvelope for a run command.
 
     Raises:
-        ValueError: If natural_language is empty.
+        ValueError: If natural_language is empty or target selection is invalid.
     """
     if not natural_language or not natural_language.strip():
         raise ValueError("natural_language must not be empty")
+    if (target is None) == (system_name is None):
+        raise ValueError(
+            "Provide exactly one of target or system_name for a run request"
+        )
+    if system_name is not None and not system_name.strip():
+        raise ValueError("system_name must not be empty")
 
     payload: dict[str, object] = {
         "verb": "run",
         "natural_language": natural_language,
-        **target.to_payload_dict(),
     }
+    if target is not None:
+        payload.update(target.to_payload_dict())
+    else:
+        payload["system_name"] = system_name.strip()  # type: ignore[union-attr]
 
     return MessageEnvelope(
         msg_type=MessageType.REQUEST,

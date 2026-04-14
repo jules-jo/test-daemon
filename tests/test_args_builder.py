@@ -208,6 +208,14 @@ class TestBuildRunArgs:
         assert isinstance(result, str)
         assert "natural_language" in result.lower()
 
+    def test_run_can_be_built_from_system_name(self) -> None:
+        result = build_verb_args("run", {
+            "system_name": "tuto",
+            "natural_language": "run the smoke tests",
+        })
+        assert isinstance(result, RunArgs)
+        assert result.system_name == "tuto"
+
     def test_empty_host_returns_error(self) -> None:
         result = build_verb_args("run", {
             "target_host": "  ",

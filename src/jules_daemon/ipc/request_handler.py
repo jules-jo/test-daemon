@@ -1197,6 +1197,35 @@ class RequestHandler:
 
         return context_lines
 
+    def _resolve_named_system(
+        self,
+        parsed: dict[str, Any],
+    ) -> dict[str, Any] | str:
+        """Resolve ``system_name`` into concrete SSH target fields.
+
+        The daemon owns this resolution so every client path can use the same
+        markdown-backed system alias registry under ``wiki/pages/systems``.
+        """
+        system_name = parsed.get("system_name")
+        if not isinstance(system_name, str) or not system_name.strip():
+            return parsed
+
+        from jules_daemon.wiki.system_info import find_system
+
+        system = find_system(self._config.wiki_root, system_name)
+        if system is None:
+            return (
+                f"Unknown system '{system_name}'. Create a markdown page under "
+                "wiki/pages/systems/ with frontmatter fields 'type: system-info', "
+                "'host', 'user', and optional 'aliases'."
+            )
+
+        resolved = dict(parsed)
+        resolved["target_host"] = system.host
+        resolved["target_user"] = system.user
+        resolved["target_port"] = system.port
+        return resolved
+
     # -- Verb handlers --
 
     def _handle_handshake(
@@ -1586,6 +1615,15 @@ class RequestHandler:
         Returns:
             RESPONSE envelope with started/completed/denied status.
         """
+        resolved = self._resolve_named_system(parsed)
+        if isinstance(resolved, str):
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary=resolved,
+                validation_errors=[],
+            )
+        parsed = resolved
+
         natural_language = parsed.get("natural_language", "")
 
         # Fast, sub-millisecond direct-command detection. When the input

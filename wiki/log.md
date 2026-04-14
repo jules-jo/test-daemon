@@ -5,7 +5,7 @@ tags:
 - jules-daemon
 type: wiki-log
 created: 2026-04-13
-updated: 2026-04-13
+updated: 2026-04-14
 ---
 
 # Wiki Log
@@ -33,3 +33,6 @@ Background agent-loop execution now launches daemon-managed runs, live output ca
 
 ## [2026-04-13] implementation | Wired the default live-run path into the monitor stack
 `RequestHandler` now registers active runs with `JobOutputBroadcaster`, routes thread-based SSH output back onto the event loop safely, prefers broadcaster-backed live output for active `watch` and `status`, and collects default monitor alerts for error keywords and failure-rate spikes. Updated the Phase 2.5 alignment/backlog pages so they no longer describe the monitor path as entirely unwired.
+
+## [2026-04-14] implementation | Added wiki-backed named systems for run requests
+Added a user-managed `pages/systems/` wiki directory plus daemon resolution for `system_name` on run requests. The CLI can now interpret prompts like `run the smoke tests in system tuto`, send the named system to the daemon, and let the daemon resolve host/user/port from a markdown page instead of requiring `root@<IP>` in the prompt.

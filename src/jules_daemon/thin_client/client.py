@@ -314,11 +314,12 @@ class ThinClient:
     async def run(
         self,
         *,
-        target_host: str,
-        target_user: str,
         natural_language: str,
+        target_host: str | None = None,
+        target_user: str | None = None,
         target_port: int = 22,
         key_path: str | None = None,
+        system_name: str | None = None,
     ) -> CommandResult:
         """Submit a new test execution.
 
@@ -327,27 +328,43 @@ class ThinClient:
         callback is invoked and the reply is sent back.
 
         Args:
+            natural_language: Description of what tests to run.
             target_host: Remote hostname or IP.
             target_user: SSH username.
-            natural_language: Description of what tests to run.
             target_port: SSH port. Default 22.
             key_path: Absolute path to SSH private key.
+            system_name: Named system alias defined in the wiki.
 
         Returns:
             CommandResult with the daemon's run response (which may
             include the confirmation cycle results).
         """
         try:
-            target = SSHTargetParams(
-                host=target_host,
-                user=target_user,
-                port=target_port,
-                key_path=key_path,
-            )
-            envelope = build_run_request(
-                target=target,
-                natural_language=natural_language,
-            )
+            if system_name is not None:
+                if (
+                    target_host is not None
+                    or target_user is not None
+                    or target_port != 22
+                    or key_path is not None
+                ):
+                    raise ValueError(
+                        "system_name cannot be combined with explicit target fields"
+                    )
+                envelope = build_run_request(
+                    natural_language=natural_language,
+                    system_name=system_name,
+                )
+            else:
+                target = SSHTargetParams(
+                    host=target_host or "",
+                    user=target_user or "",
+                    port=target_port,
+                    key_path=key_path,
+                )
+                envelope = build_run_request(
+                    target=target,
+                    natural_language=natural_language,
+                )
         except ValueError as exc:
             return CommandResult(
                 success=False,

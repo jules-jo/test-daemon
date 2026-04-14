@@ -175,6 +175,11 @@ _SSH_TARGET_RE: re.Pattern[str] = re.compile(
     r"\b([a-zA-Z0-9_.-]+)@([a-zA-Z0-9_.-]+)(?::(\d+))?\b"
 )
 
+_SYSTEM_NAME_RE: re.Pattern[str] = re.compile(
+    r"\b(?:in|on)\s+system\s+([a-zA-Z0-9_.-]+)\b",
+    re.IGNORECASE,
+)
+
 # Default verb when nothing matches
 _DEFAULT_VERB: str = "status"
 _DEFAULT_CONFIDENCE: float = 0.0
@@ -239,6 +244,14 @@ def _extract_ssh_target(
             pass
 
     return result
+
+
+def _extract_system_name(raw: str) -> dict[str, Any]:
+    """Extract ``system_name`` from phrases like ``in system tuto``."""
+    match = _SYSTEM_NAME_RE.search(raw)
+    if match is None:
+        return {}
+    return {"system_name": match.group(1)}
 
 
 def _select_best_verb(
@@ -315,11 +328,16 @@ def extract_from_natural_language(raw: str) -> NLExtraction:
     # Select best verb
     best_verb, confidence = _select_best_verb(phrase_scores, keyword_scores)
 
-    # Extract SSH target
+    # Extract SSH target or named system reference
     ssh_args = _extract_ssh_target(stripped)
+    system_args = _extract_system_name(stripped)
 
-    # Build extracted_args
+    # Build extracted_args. For run/queue intents we keep the original
+    # free-form text so downstream builders can reuse it as the NL command.
     extracted_args: dict[str, Any] = dict(ssh_args)
+    extracted_args.update(system_args)
+    if best_verb in {"run", "queue"}:
+        extracted_args["natural_language"] = stripped
 
     return NLExtraction(
         canonical_verb=best_verb,
