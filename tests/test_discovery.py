@@ -24,7 +24,9 @@ from jules_daemon.cli.verbs import DiscoverArgs, Verb, parse_verb
 from jules_daemon.execution.test_discovery import (
     DiscoveredTestSpec,
     _parse_llm_response,
+    build_discovery_help_command,
     format_spec_preview,
+    normalize_discovery_command,
     save_discovered_spec,
 )
 from jules_daemon.ipc.framing import MessageEnvelope, MessageType
@@ -79,6 +81,33 @@ class TestDiscoveredTestSpec:
             raw_help_text="help",
         )
         assert spec.typical_duration is None
+
+
+# ---------------------------------------------------------------------------
+# Discovery command normalization
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoveryCommandNormalization:
+    """Tests for discovery command normalization helpers."""
+
+    def test_normalize_bare_python_script_prefixes_python3(self) -> None:
+        assert (
+            normalize_discovery_command("/root/step.py")
+            == "python3 /root/step.py"
+        )
+
+    def test_normalize_python_command_is_unchanged(self) -> None:
+        assert (
+            normalize_discovery_command("python3 /root/step.py --flag")
+            == "python3 /root/step.py --flag"
+        )
+
+    def test_build_help_command_uses_normalized_python_invocation(self) -> None:
+        assert (
+            build_discovery_help_command("/root/step.py")
+            == "python3 /root/step.py -h"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -493,3 +522,55 @@ class TestDiscoverTestAsync:
             assert result.raw_help_text == "usage: test.py [-h] -n NAME"
             assert result.command_template == "python3 test.py"
             assert result.required_args == ()
+
+    @pytest.mark.asyncio
+    async def test_returns_raw_spec_with_normalized_python_script_command(self) -> None:
+        from jules_daemon.execution.test_discovery import discover_test
+
+        with patch(
+            "jules_daemon.execution.test_discovery.resolve_ssh_credentials",
+            return_value=None,
+        ), patch(
+            "jules_daemon.execution.test_discovery._fetch_help_text",
+            return_value="usage: step.py [-h] --name NAME",
+        ):
+            result = await discover_test(
+                host="10.0.0.1",
+                user="root",
+                command="/root/step.py",
+            )
+            assert result is not None
+            assert result.command_template == "python3 /root/step.py"
+
+    @pytest.mark.asyncio
+    async def test_normalizes_llm_parsed_python_script_template(self) -> None:
+        from jules_daemon.execution.test_discovery import discover_test
+
+        parsed_spec = DiscoveredTestSpec(
+            command_template="/root/step.py --name {name}",
+            required_args=("name",),
+            optional_args=(),
+            arg_descriptions={"name": "Name to use"},
+            typical_duration=None,
+            raw_help_text="usage: step.py [-h] --name NAME",
+        )
+
+        with patch(
+            "jules_daemon.execution.test_discovery.resolve_ssh_credentials",
+            return_value=None,
+        ), patch(
+            "jules_daemon.execution.test_discovery._fetch_help_text",
+            return_value="usage: step.py [-h] --name NAME",
+        ), patch(
+            "jules_daemon.execution.test_discovery._parse_help_with_llm",
+            AsyncMock(return_value=parsed_spec),
+        ):
+            result = await discover_test(
+                host="10.0.0.1",
+                user="root",
+                command="/root/step.py",
+                llm_client=MagicMock(),
+                llm_config=MagicMock(),
+            )
+            assert result is not None
+            assert result.command_template == "python3 /root/step.py --name {name}"

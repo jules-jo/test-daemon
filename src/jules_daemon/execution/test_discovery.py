@@ -32,7 +32,8 @@ import asyncio
 import json
 import logging
 import os
-from dataclasses import dataclass
+import shlex
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -44,8 +45,10 @@ from jules_daemon.wiki.test_knowledge import KNOWLEDGE_DIR, derive_test_slug
 
 __all__ = [
     "DiscoveredTestSpec",
+    "build_discovery_help_command",
     "discover_test",
     "format_spec_preview",
+    "normalize_discovery_command",
     "save_discovered_spec",
 ]
 
@@ -57,6 +60,19 @@ _HELP_TIMEOUT: int = 30
 # Wiki metadata for discovered test spec pages.
 _WIKI_TAGS: tuple[str, ...] = ("daemon", "test-spec", "discovered")
 _WIKI_TYPE: str = "test-spec"
+_PYTHON_INTERPRETER_NAMES: frozenset[str] = frozenset({
+    "python",
+    "python2",
+    "python3",
+    "python3.8",
+    "python3.9",
+    "python3.10",
+    "python3.11",
+    "python3.12",
+    "python3.13",
+    "python3.14",
+    "py",
+})
 
 # LLM prompt template for parsing help output.
 _LLM_PROMPT: str = """\
@@ -107,6 +123,45 @@ class DiscoveredTestSpec:
 
     # Tell pytest not to collect this as a test class.
     __test__ = False
+
+
+def normalize_discovery_command(command: str) -> str:
+    """Normalize a discover command before probing with ``-h``.
+
+    If the command starts with a bare Python script path such as
+    ``/root/test.py`` or ``./test.py``, prefix it with ``python3`` so the
+    remote probe executes the script correctly. Commands that already start
+    with a Python interpreter are left unchanged.
+    """
+    raw = command.strip()
+    if not raw:
+        return raw
+
+    try:
+        tokens = shlex.split(raw, posix=True)
+    except ValueError:
+        return raw
+
+    if not tokens:
+        return raw
+
+    first = tokens[0]
+    first_name = Path(first).name.lower()
+    if first_name in _PYTHON_INTERPRETER_NAMES:
+        return raw
+
+    if first.lower().endswith((".py", ".pyw")):
+        return f"python3 {raw}"
+
+    return raw
+
+
+def build_discovery_help_command(command: str, *, flag: str = "-h") -> str:
+    """Build the actual remote help probe command for discovery."""
+    normalized = normalize_discovery_command(command)
+    if not normalized:
+        return normalized
+    return f"{normalized} {flag}"
 
 
 # ---------------------------------------------------------------------------
@@ -191,8 +246,10 @@ async def _fetch_help_text(
 
     Returns the combined stdout+stderr, or None on failure.
     """
+    normalized_command = normalize_discovery_command(command)
+
     for flag in ("-h", "--help"):
-        full_cmd = f"{command} {flag}"
+        full_cmd = build_discovery_help_command(normalized_command, flag=flag)
         logger.info("Running help command: %s@%s: %s", username, host, full_cmd)
         try:
             exit_code, stdout, stderr = await asyncio.to_thread(
@@ -358,6 +415,7 @@ async def discover_test(
         credential=credential,
         command=command,
     )
+    normalized_command = normalize_discovery_command(command)
 
     if help_text is None:
         logger.warning("Could not fetch help text for %s on %s", command, host)
@@ -367,12 +425,17 @@ async def discover_test(
     if llm_client is not None and llm_config is not None:
         spec = await _parse_help_with_llm(help_text, llm_client, llm_config)
         if spec is not None:
+            normalized_template = normalize_discovery_command(
+                spec.command_template or normalized_command
+            )
+            if normalized_template != spec.command_template:
+                spec = replace(spec, command_template=normalized_template)
             return spec
         logger.warning("LLM parsing failed, returning raw help text only")
 
     # Fallback: return raw spec without structured extraction
     return DiscoveredTestSpec(
-        command_template=command,
+        command_template=normalized_command,
         required_args=(),
         optional_args=(),
         arg_descriptions={},

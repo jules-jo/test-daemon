@@ -2063,6 +2063,78 @@ class TestRequestHandlerInterpretVerb:
         assert "I still need a bit more information" in prompt.payload["context"]
 
 
+class TestRequestHandlerDiscoverVerb:
+    """Tests for discover verb handling."""
+
+    @pytest.mark.asyncio
+    async def test_discover_python_script_prompt_uses_python3(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from jules_daemon.execution.test_discovery import DiscoveredTestSpec
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+
+        approve_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="discover-pre-reply",
+            timestamp="2026-04-09T12:00:01Z",
+            payload={"approved": True},
+        )
+        save_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="discover-save-reply",
+            timestamp="2026-04-09T12:00:02Z",
+            payload={"approved": True},
+        )
+        approve_frame = encode_frame(approve_reply)
+        save_frame = encode_frame(save_reply)
+        client.reader.readexactly = AsyncMock(
+            side_effect=[
+                approve_frame[:4], approve_frame[4:],
+                save_frame[:4], save_frame[4:],
+            ],
+        )
+
+        with patch(
+            "jules_daemon.ipc.request_handler.discover_test",
+            AsyncMock(return_value=DiscoveredTestSpec(
+                command_template="python3 /root/step.py",
+                required_args=(),
+                optional_args=(),
+                arg_descriptions={},
+                typical_duration=None,
+                raw_help_text="usage: step.py [-h]",
+            )),
+        ), patch(
+            "jules_daemon.ipc.request_handler.save_discovered_spec",
+            return_value=tmp_path / "pages" / "daemon" / "knowledge" / "test-step.md",
+        ):
+            response = await handler.handle_message(
+                _make_request(payload={
+                    "verb": "discover",
+                    "target_host": "10.0.0.10",
+                    "target_user": "root",
+                    "command": "/root/step.py",
+                }),
+                client,
+            )
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["status"] == "saved"
+
+        prompt_frame = client.writer.write.call_args_list[0].args[0]
+        prompt_length = unpack_header(prompt_frame[:HEADER_SIZE])
+        prompt = decode_envelope(
+            prompt_frame[HEADER_SIZE:HEADER_SIZE + prompt_length]
+        )
+        assert prompt.msg_type == MessageType.CONFIRM_PROMPT
+        assert prompt.payload["proposed_command"] == "python3 /root/step.py -h"
+        assert "python3 /root/step.py -h" in prompt.payload["message"]
+
+
 # ---------------------------------------------------------------------------
 # RequestHandler: response correlation
 # ---------------------------------------------------------------------------

@@ -145,6 +145,7 @@ from jules_daemon.wiki import current_run as current_run_io
 from jules_daemon.wiki.command_queue import CommandQueue
 from jules_daemon.execution.test_discovery import (
     DiscoveredTestSpec,
+    build_discovery_help_command,
     discover_test,
     format_spec_preview,
     save_discovered_spec,
@@ -2006,7 +2007,7 @@ class RequestHandler:
             logger.debug("Failed to check existing spec: %s", exc)
 
         # Step 1: Ask permission to run -h on the remote host
-        help_command = f"{command} -h"
+        help_command = build_discovery_help_command(command)
         pre_confirm_id = f"discover-pre-{uuid.uuid4().hex[:12]}"
         pre_confirm = MessageEnvelope(
             msg_type=MessageType.CONFIRM_PROMPT,
