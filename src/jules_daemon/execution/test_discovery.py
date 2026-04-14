@@ -150,7 +150,7 @@ def normalize_discovery_command(command: str) -> str:
 def resolve_discovery_command_candidates(command: str) -> tuple[str, ...]:
     """Return ordered base-command candidates for test discovery.
 
-    Bare ``.py`` script paths try ``python`` first, then ``python3``.
+    Bare ``.py`` script paths try ``python3`` first, then ``python``.
     Commands that already include an interpreter or are not Python scripts
     keep their original form only.
     """
@@ -172,7 +172,7 @@ def resolve_discovery_command_candidates(command: str) -> tuple[str, ...]:
         return (raw,)
 
     if first.lower().endswith((".py", ".pyw")):
-        return (f"python {raw}", f"python3 {raw}")
+        return (f"python3 {raw}", f"python {raw}")
 
     return (raw,)
 

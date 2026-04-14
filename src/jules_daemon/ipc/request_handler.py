@@ -146,9 +146,9 @@ from jules_daemon.wiki.command_queue import CommandQueue
 from jules_daemon.execution.test_discovery import (
     DiscoveredTestSpec,
     build_discovery_help_command,
-    build_discovery_help_commands,
     discover_test,
     format_spec_preview,
+    resolve_discovery_command_candidates,
     save_discovered_spec,
 )
 from jules_daemon.wiki.test_knowledge import (
@@ -2007,96 +2007,128 @@ class RequestHandler:
         except Exception as exc:
             logger.debug("Failed to check existing spec: %s", exc)
 
-        # Step 1: Ask permission to run -h on the remote host
-        help_commands = build_discovery_help_commands(command)
-        help_command = help_commands[0] if help_commands else build_discovery_help_command(command)
-        help_command_display = help_command
-        if len(help_commands) > 1:
-            fallback_display = ", ".join(help_commands[1:])
-            help_command_display = (
-                f"{help_command} (fallback: {fallback_display})"
-            )
-        pre_confirm_id = f"discover-pre-{uuid.uuid4().hex[:12]}"
-        pre_confirm = MessageEnvelope(
-            msg_type=MessageType.CONFIRM_PROMPT,
-            msg_id=pre_confirm_id,
-            timestamp=_now_iso(),
-            payload={
-                "proposed_command": help_command_display,
-                "target_host": target_host,
-                "target_user": target_user,
-                "message": (
-                    f"Will run '{help_command_display}' on "
-                    f"{target_user}@{target_host}:{target_port} "
-                    f"to discover test arguments."
-                ),
-            },
-        )
-        try:
-            await self._send_envelope(client, pre_confirm)
-        except Exception as exc:
-            return _build_error_response(
-                msg_id=msg_id,
-                error_summary="Failed to send discovery confirmation",
-                validation_errors=[],
-            )
+        # Step 1: Ask permission before each actual remote discovery attempt.
+        spec: DiscoveredTestSpec | None = None
+        attempted_commands: list[str] = []
+        command_candidates = resolve_discovery_command_candidates(command)
+        if not command_candidates:
+            command_candidates = (command,)
 
-        try:
-            pre_reply = await self._read_envelope(client, timeout=120.0)
-        except (asyncio.TimeoutError, Exception):
-            return _build_error_response(
-                msg_id=msg_id,
-                error_summary="Discovery confirmation timed out",
-                validation_errors=[],
+        for index, candidate in enumerate(command_candidates):
+            primary_help_command = build_discovery_help_command(candidate)
+            fallback_help_command = build_discovery_help_command(
+                candidate,
+                flag="--help",
             )
+            attempted_commands.append(candidate)
 
-        if pre_reply is None or not pre_reply.payload.get("approved", False):
-            return _build_success_response(
-                msg_id=msg_id,
-                verb="discover",
-                extra={"status": "denied", "message": "Discovery cancelled."},
-            )
+            if index > 0:
+                fallback_msg = MessageEnvelope(
+                    msg_type=MessageType.STREAM,
+                    msg_id=f"discover-fallback-{uuid.uuid4().hex[:12]}",
+                    timestamp=_now_iso(),
+                    payload={
+                        "line": (
+                            f"\nNo usable help output was found from the previous "
+                            f"discovery attempt. Jules can try the fallback command "
+                            f"'{primary_help_command}' next.\n"
+                        ),
+                        "is_end": False,
+                    },
+                )
+                try:
+                    await self._send_envelope(client, fallback_msg)
+                except Exception:
+                    pass
 
-        # Step 2: SSH in, run -h, parse with LLM
-        status_msg = MessageEnvelope(
-            msg_type=MessageType.STREAM,
-            msg_id=f"discover-status-{uuid.uuid4().hex[:12]}",
-            timestamp=_now_iso(),
-            payload={
-                "line": (
-                    f"\nRunning '{help_command_display}' on "
-                    f"{target_user}@{target_host}...\n"
-                ),
-                "is_end": False,
-            },
-        )
-        try:
-            await self._send_envelope(client, status_msg)
-        except Exception:
-            pass
+            pre_confirm_id = f"discover-pre-{uuid.uuid4().hex[:12]}"
+            pre_confirm = MessageEnvelope(
+                msg_type=MessageType.CONFIRM_PROMPT,
+                msg_id=pre_confirm_id,
+                timestamp=_now_iso(),
+                payload={
+                    "proposed_command": primary_help_command,
+                    "target_host": target_host,
+                    "target_user": target_user,
+                    "message": (
+                        f"Will run '{primary_help_command}' on "
+                        f"{target_user}@{target_host}:{target_port} "
+                        f"to discover test arguments. If that does not produce "
+                        f"usable help output, Jules may also run "
+                        f"'{fallback_help_command}' for the same interpreter."
+                    ),
+                },
+            )
+            try:
+                await self._send_envelope(client, pre_confirm)
+            except Exception:
+                return _build_error_response(
+                    msg_id=msg_id,
+                    error_summary="Failed to send discovery confirmation",
+                    validation_errors=[],
+                )
 
-        try:
-            spec = await discover_test(
-                host=target_host,
-                user=target_user,
-                command=command,
-                port=target_port,
-                llm_client=self._config.llm_client,
-                llm_config=self._config.llm_config,
+            try:
+                pre_reply = await self._read_envelope(client, timeout=120.0)
+            except (asyncio.TimeoutError, Exception):
+                return _build_error_response(
+                    msg_id=msg_id,
+                    error_summary="Discovery confirmation timed out",
+                    validation_errors=[],
+                )
+
+            if pre_reply is None or not pre_reply.payload.get("approved", False):
+                return _build_success_response(
+                    msg_id=msg_id,
+                    verb="discover",
+                    extra={"status": "denied", "message": "Discovery cancelled."},
+                )
+
+            status_msg = MessageEnvelope(
+                msg_type=MessageType.STREAM,
+                msg_id=f"discover-status-{uuid.uuid4().hex[:12]}",
+                timestamp=_now_iso(),
+                payload={
+                    "line": (
+                        f"\nRunning '{primary_help_command}' on "
+                        f"{target_user}@{target_host}...\n"
+                    ),
+                    "is_end": False,
+                },
             )
-        except Exception as exc:
-            logger.error("Discovery failed for msg_id=%s: %s", msg_id, exc)
-            return _build_error_response(
-                msg_id=msg_id,
-                error_summary=f"Discovery failed: {exc}",
-                validation_errors=[],
-            )
+            try:
+                await self._send_envelope(client, status_msg)
+            except Exception:
+                pass
+
+            try:
+                spec = await discover_test(
+                    host=target_host,
+                    user=target_user,
+                    command=candidate,
+                    port=target_port,
+                    llm_client=self._config.llm_client,
+                    llm_config=self._config.llm_config,
+                )
+            except Exception as exc:
+                logger.error("Discovery failed for msg_id=%s: %s", msg_id, exc)
+                return _build_error_response(
+                    msg_id=msg_id,
+                    error_summary=f"Discovery failed: {exc}",
+                    validation_errors=[],
+                )
+
+            if spec is not None:
+                break
 
         if spec is None:
+            attempted_display = ", ".join(
+                f"'{cmd}'" for cmd in attempted_commands
+            ) or f"'{command}'"
             return _build_error_response(
                 msg_id=msg_id,
                 error_summary=(
-                    f"Could not fetch help output for '{command}' "
+                    f"Could not fetch help output for {attempted_display} "
                     f"on {target_user}@{target_host}:{target_port}"
                 ),
                 validation_errors=[],

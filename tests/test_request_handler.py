@@ -2067,7 +2067,7 @@ class TestRequestHandlerDiscoverVerb:
     """Tests for discover verb handling."""
 
     @pytest.mark.asyncio
-    async def test_discover_python_script_prompt_shows_python_then_python3_fallback(
+    async def test_discover_python_script_prompt_uses_python3_first(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2131,11 +2131,98 @@ class TestRequestHandlerDiscoverVerb:
             prompt_frame[HEADER_SIZE:HEADER_SIZE + prompt_length]
         )
         assert prompt.msg_type == MessageType.CONFIRM_PROMPT
-        assert prompt.payload["proposed_command"] == (
-            "python /root/step.py -h (fallback: python3 /root/step.py -h)"
-        )
-        assert "python /root/step.py -h" in prompt.payload["message"]
+        assert prompt.payload["proposed_command"] == "python3 /root/step.py -h"
         assert "python3 /root/step.py -h" in prompt.payload["message"]
+        assert "python3 /root/step.py --help" in prompt.payload["message"]
+
+    @pytest.mark.asyncio
+    async def test_discover_python_script_fallback_requires_second_approval(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from jules_daemon.execution.test_discovery import DiscoveredTestSpec
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+
+        approve_python3_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="discover-pre-python3-reply",
+            timestamp="2026-04-09T12:00:01Z",
+            payload={"approved": True},
+        )
+        approve_python_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="discover-pre-python-reply",
+            timestamp="2026-04-09T12:00:02Z",
+            payload={"approved": True},
+        )
+        save_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="discover-save-reply",
+            timestamp="2026-04-09T12:00:03Z",
+            payload={"approved": True},
+        )
+        frames = [
+            encode_frame(approve_python3_reply),
+            encode_frame(approve_python_reply),
+            encode_frame(save_reply),
+        ]
+        client.reader.readexactly = AsyncMock(
+            side_effect=[
+                frames[0][:4], frames[0][4:],
+                frames[1][:4], frames[1][4:],
+                frames[2][:4], frames[2][4:],
+            ],
+        )
+
+        sent_frames: list[bytes] = []
+
+        def _capture_write(data: bytes) -> None:
+            sent_frames.append(data)
+
+        client.writer.write = _capture_write
+
+        with patch(
+            "jules_daemon.ipc.request_handler.discover_test",
+            AsyncMock(side_effect=[
+                None,
+                DiscoveredTestSpec(
+                    command_template="python /root/step.py",
+                    required_args=(),
+                    optional_args=(),
+                    arg_descriptions={},
+                    typical_duration=None,
+                    raw_help_text="usage: step.py [-h]",
+                ),
+            ]),
+        ), patch(
+            "jules_daemon.ipc.request_handler.save_discovered_spec",
+            return_value=tmp_path / "pages" / "daemon" / "knowledge" / "test-step.md",
+        ):
+            response = await handler.handle_message(
+                _make_request(payload={
+                    "verb": "discover",
+                    "target_host": "10.0.0.10",
+                    "target_user": "root",
+                    "command": "/root/step.py",
+                }),
+                client,
+            )
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["status"] == "saved"
+
+        envelopes = [
+            decode_envelope(frame[HEADER_SIZE:]) for frame in sent_frames
+        ]
+        confirm_prompts = [
+            env for env in envelopes if env.msg_type == MessageType.CONFIRM_PROMPT
+        ]
+        assert confirm_prompts[0].payload["proposed_command"] == "python3 /root/step.py -h"
+        assert confirm_prompts[1].payload["proposed_command"] == "python /root/step.py -h"
+        assert "python /root/step.py --help" in confirm_prompts[1].payload["message"]
 
 
 # ---------------------------------------------------------------------------
