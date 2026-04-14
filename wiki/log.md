@@ -42,3 +42,6 @@ Documented that system aliases are loaded from the daemon's configured `--wiki-d
 
 ## [2026-04-14] implementation | Added richer target details to SSH approval prompts
 SSH command approval prompts now show named-system context alongside the resolved SSH target. When a system page provides optional `hostname` or `ip_address` fields, the prompt includes those fields so the user can see the friendly system name and the concrete remote endpoint before approving execution.
+
+## [2026-04-14] design | Recorded hybrid plan for broader natural-language request handling
+Added `wiki/pages/architecture/agent-driven-request-interpretation.md` to capture the next-step design direction: keep only a thin deterministic front door for obvious structured commands, let unresolved conversational run requests fall into a daemon-side agent interpretation path, and keep final target validation, approvals, execution, monitoring, and recovery deterministic in daemon code.

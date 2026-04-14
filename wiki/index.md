@@ -28,6 +28,7 @@ Content-oriented catalog for the repo-local codebase wiki and the daemon's runti
 - [Phase 2.5 Design Record](pages/architecture/phase-2-5-design-record.md) -- pre-build design decisions, tool-surface evolution, and acceptance criteria for the agent-loop foundation
 - [Phase 2.5 Alignment Checklist](pages/architecture/phase-2-5-alignment-checklist.md) -- concrete aligned versus partial versus not-yet-aligned comparison against the interview and scenario
 - [Phase 2.5 Implementation Backlog](pages/architecture/phase-2-5-implementation-backlog.md) -- prioritized follow-up work needed to close the remaining scenario gaps
+- [Agent-Driven Request Interpretation](pages/architecture/agent-driven-request-interpretation.md) -- proposed hybrid design that keeps transport/safety deterministic while expanding agent-side handling for conversational run prompts
 
 ## Concepts
 
