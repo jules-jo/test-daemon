@@ -70,7 +70,6 @@ The main daemon lifecycle starts in `src/jules_daemon/__main__.py`. It initializ
 - The packaged `jules` entrypoint still targets `cli_main.py`, while a newer `cli/` pipeline exists in parallel.
 - Natural-language `run` requests prefer the agent loop when LLM configuration is available; direct commands intentionally bypass it for latency and backward-compatibility.
 - The runtime wiki is not just documentation. It is part of the daemon's persistence model.
-- Interactive `jules` REPL sessions now open a background notification subscription, so completion and alert events are printed without requiring a follow-up `status` command.
 - Agent-started `execute_ssh` runs now reuse the daemon's background run lifecycle, so `status` and `read_output` can inspect live partial output before terminal completion.
 - The default daemon startup path now instantiates a `NotificationBroadcaster`, and `notify_user` prefers broadcaster-backed delivery when subscribers exist.
 - Active-run watch/status/live-output paths now prefer `JobOutputBroadcaster` and default monitor detectors in `RequestHandler`; the older in-memory buffer/queue path remains as a fallback for completed runs and legacy watch behavior.

@@ -2,19 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
-import pytest
-
-from jules_daemon.cli_main import (
-    _notification_socket_path,
-    _repl,
-    _resolve_input,
-)
-from jules_daemon.thin_client.client import ThinClient, ThinClientConfig
+from jules_daemon.cli_main import _resolve_input
 
 
 class TestResolveInput:
@@ -76,46 +66,3 @@ class TestResolveInput:
         assert result.hint == "(sent to daemon for interpretation)"
         assert result.error is None
         mock_input.assert_not_called()
-
-
-class TestNotificationListener:
-    """Interactive REPL should keep a background notification subscriber alive."""
-
-    def test_notification_socket_path_uses_client_config(self) -> None:
-        client = ThinClient(
-            config=ThinClientConfig(socket_path=Path("/tmp/jules.sock"))
-        )
-        assert _notification_socket_path(client) == Path("/tmp/jules.sock")
-
-    def test_notification_socket_path_uses_discovery_when_missing(self) -> None:
-        client = ThinClient()
-        with patch(
-            "jules_daemon.ipc.socket_discovery.default_socket_path",
-            return_value=Path("/tmp/discovered.sock"),
-        ):
-            assert _notification_socket_path(client) == Path("/tmp/discovered.sock")
-
-    @pytest.mark.asyncio
-    async def test_repl_starts_and_stops_notification_listener(self) -> None:
-        client = ThinClient()
-        task = asyncio.create_task(asyncio.sleep(3600))
-        stop_mock = AsyncMock()
-
-        with patch(
-            "jules_daemon.cli_main._start_notification_listener",
-            return_value=task,
-        ) as start_mock, patch(
-            "jules_daemon.cli_main._stop_notification_listener",
-            stop_mock,
-        ), patch(
-            "builtins.input",
-            side_effect=["quit"],
-        ):
-            exit_code = await _repl(client)
-
-        assert exit_code == 0
-        start_mock.assert_called_once_with(client)
-        stop_mock.assert_awaited_once_with(task)
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
