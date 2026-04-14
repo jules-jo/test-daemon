@@ -1365,6 +1365,63 @@ class TestRequestHandlerRunVerb:
         assert prompt.payload["target_user"] == "root"
         assert prompt.payload["system_name"] == "tuto"
 
+    def test_resolve_named_system_strips_explicit_system_phrase_from_nl(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        systems_dir = tmp_path / "pages" / "systems"
+        systems_dir.mkdir(parents=True, exist_ok=True)
+        (systems_dir / "tuto.md").write_text(
+            "---\n"
+            "type: system-info\n"
+            "system_name: tuto\n"
+            "host: 10.0.0.10\n"
+            "user: root\n"
+            "---\n\n"
+            "# Tuto\n",
+            encoding="utf-8",
+        )
+
+        handler = RequestHandler(config=RequestHandlerConfig(wiki_root=tmp_path))
+        resolved = handler._resolve_named_system({
+            "system_name": "tuto",
+            "natural_language": "run smoke tests in system tuto",
+        })
+
+        assert isinstance(resolved, dict)
+        assert resolved["natural_language"] == "run smoke tests"
+        assert resolved["original_natural_language"] == "run smoke tests in system tuto"
+
+    def test_infer_named_system_strips_implicit_system_phrase_from_nl(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        systems_dir = tmp_path / "pages" / "systems"
+        systems_dir.mkdir(parents=True, exist_ok=True)
+        (systems_dir / "tutorial-box.md").write_text(
+            "---\n"
+            "type: system-info\n"
+            "system_name: tutorial-box\n"
+            "aliases:\n"
+            "  - tuto\n"
+            "host: 10.0.0.10\n"
+            "user: root\n"
+            "---\n\n"
+            "# Tutorial Box\n",
+            encoding="utf-8",
+        )
+
+        handler = RequestHandler(config=RequestHandlerConfig(wiki_root=tmp_path))
+        resolved = handler._infer_named_system_from_request({
+            "infer_target": True,
+            "natural_language": "run smoke tests in tuto",
+        })
+
+        assert isinstance(resolved, dict)
+        assert resolved["resolved_system_name"] == "tutorial-box"
+        assert resolved["natural_language"] == "run smoke tests"
+        assert resolved["original_natural_language"] == "run smoke tests in tuto"
+
     @pytest.mark.asyncio
     async def test_run_with_named_system_includes_optional_prompt_metadata(
         self,

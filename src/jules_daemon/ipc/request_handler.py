@@ -1213,7 +1213,7 @@ class RequestHandler:
         if not isinstance(system_name, str) or not system_name.strip():
             return parsed
 
-        from jules_daemon.wiki.system_info import find_system
+        from jules_daemon.wiki.system_info import find_system, strip_system_mention
 
         system = find_system(self._config.wiki_root, system_name)
         if system is None:
@@ -1228,6 +1228,12 @@ class RequestHandler:
         resolved["target_user"] = system.user
         resolved["target_port"] = system.port
         resolved["resolved_system_name"] = system.system_name
+        natural_language = parsed.get("natural_language")
+        if isinstance(natural_language, str) and natural_language.strip():
+            normalized_nl = strip_system_mention(natural_language, system)
+            if normalized_nl != natural_language:
+                resolved["original_natural_language"] = natural_language
+                resolved["natural_language"] = normalized_nl
         if system.description:
             resolved["resolved_system_description"] = system.description
         if system.display_hostname:

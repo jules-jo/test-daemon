@@ -23,6 +23,7 @@ __all__ = [
     "find_system",
     "find_system_mention",
     "list_systems",
+    "strip_system_mention",
 ]
 
 logger = logging.getLogger(__name__)
@@ -231,3 +232,35 @@ def find_system_mention(wiki_root: Path, text: str) -> SystemInfo | None:
         if pattern.search(raw):
             return system
     return None
+
+
+def strip_system_mention(text: str, system: SystemInfo) -> str:
+    """Remove a resolved system alias phrase from free text.
+
+    Examples:
+        ``run the smoke tests in tuto`` -> ``run the smoke tests``
+        ``run the smoke tests in system tuto`` -> ``run the smoke tests``
+    """
+    raw = text.strip()
+    if not raw:
+        return raw
+
+    result = raw
+    prefix = "|".join(re.escape(p) for p in _SYSTEM_MENTION_PREFIXES)
+    candidates = [system.normalized_name, *system.aliases]
+    for candidate in sorted(
+        (item for item in candidates if item),
+        key=len,
+        reverse=True,
+    ):
+        escaped = re.escape(candidate)
+        pattern = re.compile(
+            rf"\b(?:{prefix})\s+(?:system\s+)?{escaped}(?=$|[\s?.!,;:])",
+            re.IGNORECASE,
+        )
+        result = pattern.sub("", result)
+
+    result = re.sub(r"\s{2,}", " ", result)
+    result = re.sub(r"\s+([?.!,;:])", r"\1", result)
+    cleaned = result.strip()
+    return cleaned or raw

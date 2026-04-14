@@ -6,9 +6,11 @@ from pathlib import Path
 
 from jules_daemon.wiki.system_info import (
     SYSTEMS_DIR,
+    SystemInfo,
     find_system,
     find_system_mention,
     list_systems,
+    strip_system_mention,
 )
 
 
@@ -131,3 +133,32 @@ class TestSystemInfo:
         system = find_system_mention(tmp_path, "run the smoke tests on tuto")
         assert system is not None
         assert system.system_name == "tutorial-box"
+
+    def test_strip_system_mention_removes_primary_name(self) -> None:
+        system = SystemInfo(
+            system_name="tuto",
+            host="10.0.0.10",
+            user="root",
+        )
+
+        stripped = strip_system_mention(
+            "run the smoke tests in tuto",
+            system,
+        )
+
+        assert stripped == "run the smoke tests"
+
+    def test_strip_system_mention_preserves_punctuation(self) -> None:
+        system = SystemInfo(
+            system_name="tutorial-box",
+            host="10.0.0.10",
+            user="root",
+            aliases=("tuto",),
+        )
+
+        stripped = strip_system_mention(
+            "can you run the smoke tests in tuto?",
+            system,
+        )
+
+        assert stripped == "can you run the smoke tests?"
