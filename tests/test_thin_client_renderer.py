@@ -139,15 +139,24 @@ class TestRenderConfirmPrompt:
             MessageType.CONFIRM_PROMPT,
             {
                 "command": "cd /app && pytest -v tests/",
+                "system_name": "tuto",
+                "system_hostname": "tuto.internal.example",
+                "system_ip_address": "10.0.0.10",
+                "system_description": "Tutorial box for smoke-test runs",
                 "target_host": "staging.example.com",
                 "target_user": "deploy",
+                "target_port": 2222,
                 "risk_level": "HIGH",
                 "explanation": "Runs the full test suite",
             },
         )
         result = render_confirm_prompt(envelope)
         assert "SSH Command Approval Required" in result
-        assert "deploy@staging.example.com" in result
+        assert "System:      tuto" in result
+        assert "Host:        tuto.internal.example" in result
+        assert "IP:          10.0.0.10" in result
+        assert "Target:      deploy@staging.example.com:2222" in result
+        assert "Tutorial box for smoke-test runs" in result
         assert "cd /app && pytest -v tests/" in result
         assert "HIGH" in result
         assert "Runs the full test suite" in result
@@ -167,11 +176,17 @@ class TestRenderConfirmPrompt:
     def test_no_explanation(self):
         envelope = _make_envelope(
             MessageType.CONFIRM_PROMPT,
-            {"command": "make test", "target_host": "ci", "target_user": "root"},
+            {
+                "command": "make test",
+                "target_host": "ci",
+                "target_user": "root",
+                "target_port": 22,
+            },
         )
         result = render_confirm_prompt(envelope)
         # No "Explanation:" line when explanation is empty
         assert "make test" in result
+        assert "Target:      root@ci:22" in result
 
 
 # ---------------------------------------------------------------------------

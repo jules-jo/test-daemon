@@ -89,6 +89,11 @@ def render_confirm_prompt(envelope: MessageEnvelope) -> str:
     command = payload.get("proposed_command") or payload.get("command") or "<no command>"
     target_host = payload.get("target_host", "")
     target_user = payload.get("target_user", "")
+    target_port = payload.get("target_port")
+    system_name = payload.get("system_name", "")
+    system_hostname = payload.get("system_hostname", "")
+    system_ip_address = payload.get("system_ip_address", "")
+    system_description = payload.get("system_description", "")
     risk_level = payload.get("risk_level", "")
     explanation = payload.get("explanation", "")
     # Custom title and message for non-SSH prompts (e.g., discover save)
@@ -111,8 +116,22 @@ def render_confirm_prompt(envelope: MessageEnvelope) -> str:
     ]
 
     # Only show target if it's an SSH prompt (has user and host)
-    if target_user and target_host and not prompt_title:
-        lines.append(f"  Target:      {target_user}@{target_host}")
+    if not prompt_title:
+        if system_name:
+            lines.append(f"  System:      {system_name}")
+        if system_hostname and system_hostname != target_host:
+            lines.append(f"  Host:        {system_hostname}")
+        if system_ip_address and system_ip_address != target_host:
+            lines.append(f"  IP:          {system_ip_address}")
+        if target_host:
+            target_label = target_host
+            if target_user:
+                target_label = f"{target_user}@{target_label}"
+            if isinstance(target_port, int):
+                target_label = f"{target_label}:{target_port}"
+            lines.append(f"  Target:      {target_label}")
+        if system_description:
+            lines.append(f"  Description: {system_description}")
 
     # Show message if provided (used for non-SSH prompts), else show command
     if message and prompt_title:

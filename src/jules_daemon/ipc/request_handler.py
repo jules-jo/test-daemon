@@ -1224,7 +1224,42 @@ class RequestHandler:
         resolved["target_host"] = system.host
         resolved["target_user"] = system.user
         resolved["target_port"] = system.port
+        resolved["resolved_system_name"] = system.system_name
+        if system.description:
+            resolved["resolved_system_description"] = system.description
+        if system.display_hostname:
+            resolved["resolved_system_hostname"] = system.display_hostname
+        if system.display_ip_address:
+            resolved["resolved_system_ip_address"] = system.display_ip_address
         return resolved
+
+    def _build_confirm_target_payload(
+        self,
+        *,
+        parsed: dict[str, Any],
+        target_host: str,
+        target_user: str,
+        target_port: int,
+    ) -> dict[str, Any]:
+        """Return prompt payload fields describing the resolved SSH target."""
+        payload: dict[str, Any] = {
+            "target_host": target_host,
+            "target_user": target_user,
+            "target_port": target_port,
+        }
+        system_name = parsed.get("resolved_system_name")
+        if isinstance(system_name, str) and system_name.strip():
+            payload["system_name"] = system_name.strip()
+        system_hostname = parsed.get("resolved_system_hostname")
+        if isinstance(system_hostname, str) and system_hostname.strip():
+            payload["system_hostname"] = system_hostname.strip()
+        system_ip = parsed.get("resolved_system_ip_address")
+        if isinstance(system_ip, str) and system_ip.strip():
+            payload["system_ip_address"] = system_ip.strip()
+        system_description = parsed.get("resolved_system_description")
+        if isinstance(system_description, str) and system_description.strip():
+            payload["system_description"] = system_description.strip()
+        return payload
 
     # -- Verb handlers --
 
@@ -1758,7 +1793,7 @@ class RequestHandler:
         )
 
         # Build IPC callback bridges
-        confirm_cb = make_confirm_callback(client)
+        confirm_cb = make_confirm_callback(client, target_context=parsed)
         ask_cb = make_ask_callback(client)
         notify_cb = make_notify_callback(
             client,
@@ -2292,8 +2327,13 @@ class RequestHandler:
                 timestamp=_now_iso(),
                 payload={
                     "proposed_command": proposed_command,
-                    "target_host": target_host,
                     "message": "Queue this command to run after the current test finishes?",
+                    **self._build_confirm_target_payload(
+                        parsed=parsed,
+                        target_host=target_host,
+                        target_user=target_user,
+                        target_port=target_port,
+                    ),
                 },
             )
             try:
@@ -2370,13 +2410,16 @@ class RequestHandler:
             timestamp=_now_iso(),
             payload={
                 "proposed_command": proposed_command,
-                "target_host": target_host,
-                "target_user": target_user,
-                "target_port": target_port,
                 "original_msg_id": msg_id,
                 "message": (
                     f"Execute on {target_user}@{target_host}:{target_port}?\n"
                     f"  $ {proposed_command}"
+                ),
+                **self._build_confirm_target_payload(
+                    parsed=parsed,
+                    target_host=target_host,
+                    target_user=target_user,
+                    target_port=target_port,
                 ),
             },
         )
@@ -2599,11 +2642,16 @@ class RequestHandler:
                 timestamp=_now_iso(),
                 payload={
                     "proposed_command": proposed_command,
-                    "target_host": target_host,
                     "original_msg_id": msg_id,
                     "message": (
                         "Test processes detected on remote host. "
                         "Proceed anyway?"
+                    ),
+                    **self._build_confirm_target_payload(
+                        parsed=parsed,
+                        target_host=target_host,
+                        target_user=target_user,
+                        target_port=target_port,
                     ),
                 },
             )

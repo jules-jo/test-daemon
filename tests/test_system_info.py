@@ -73,3 +73,22 @@ class TestSystemInfo:
         )
 
         assert list_systems(tmp_path) == ()
+
+    def test_optional_hostname_and_ip_are_loaded(self, tmp_path: Path) -> None:
+        _write_system(
+            tmp_path,
+            "tuto",
+            frontmatter_text=(
+                "type: system-info\n"
+                "system_name: tuto\n"
+                "host: 10.0.0.10\n"
+                "hostname: tuto.internal.example\n"
+                "ip_address: 10.0.0.10\n"
+                "user: root\n"
+            ),
+        )
+
+        system = find_system(tmp_path, "tuto")
+        assert system is not None
+        assert system.display_hostname == "tuto.internal.example"
+        assert system.display_ip_address == "10.0.0.10"

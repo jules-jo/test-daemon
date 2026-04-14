@@ -39,3 +39,6 @@ Added a user-managed `pages/systems/` wiki directory plus daemon resolution for 
 
 ## [2026-04-14] docs | Clarified daemon wiki-dir behavior for named systems
 Documented that system aliases are loaded from the daemon's configured `--wiki-dir`, not automatically from the repo-local `wiki/` folder. Added a copyable `wiki/pages/systems/example-system.md` template file for defining named SSH targets.
+
+## [2026-04-14] implementation | Added richer target details to SSH approval prompts
+SSH command approval prompts now show named-system context alongside the resolved SSH target. When a system page provides optional `hostname` or `ip_address` fields, the prompt includes those fields so the user can see the friendly system name and the concrete remote endpoint before approving execution.

@@ -22,8 +22,10 @@ from jules_daemon.agent.ipc_bridge import (
     make_notify_callback,
 )
 from jules_daemon.ipc.framing import (
+    unpack_header,
     MessageEnvelope,
     MessageType,
+    decode_envelope,
     encode_frame,
 )
 from jules_daemon.ipc.notification_broadcaster import NotificationBroadcaster
@@ -143,6 +145,36 @@ class TestMakeConfirmCallback:
         # Verify write was called (the frame was sent)
         assert client.writer.write.called
         assert client.writer.drain.called
+
+    @pytest.mark.asyncio
+    async def test_includes_target_context_metadata(self) -> None:
+        client = _make_client()
+        _setup_reply(client, {"approved": True})
+
+        callback = make_confirm_callback(
+            client,
+            target_context={
+                "target_host": "10.0.0.10",
+                "target_user": "root",
+                "target_port": 22,
+                "resolved_system_name": "tuto",
+                "resolved_system_hostname": "tuto.internal.example",
+                "resolved_system_ip_address": "10.0.0.10",
+                "resolved_system_description": "Tutorial box",
+            },
+        )
+        await callback("pytest -v", "10.0.0.10", "Test run")
+
+        written = b"".join(call.args[0] for call in client.writer.write.call_args_list)
+        payload_length = unpack_header(written[:4])
+        prompt = decode_envelope(written[4:4 + payload_length])
+
+        assert prompt.msg_type == MessageType.CONFIRM_PROMPT
+        assert prompt.payload["system_name"] == "tuto"
+        assert prompt.payload["system_hostname"] == "tuto.internal.example"
+        assert prompt.payload["system_ip_address"] == "10.0.0.10"
+        assert prompt.payload["target_user"] == "root"
+        assert prompt.payload["target_port"] == 22
 
 
 # ---------------------------------------------------------------------------

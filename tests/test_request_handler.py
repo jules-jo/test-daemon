@@ -24,6 +24,8 @@ from jules_daemon.ipc.framing import (
     MessageEnvelope,
     MessageType,
     decode_envelope,
+    encode_frame,
+    unpack_header,
 )
 from jules_daemon.ipc.notification_broadcaster import NotificationBroadcaster
 from jules_daemon.ipc.request_handler import (
@@ -1300,8 +1302,64 @@ class TestRequestHandlerRunVerb:
         assert response.msg_type == MessageType.RESPONSE
         assert response.payload["status"] == "denied"
         prompt_bytes = b"".join(call.args[0] for call in client.writer.write.call_args_list)
-        assert b"10.0.0.10" in prompt_bytes
-        assert b"root" in prompt_bytes
+        prompt_length = unpack_header(prompt_bytes[:HEADER_SIZE])
+        prompt = decode_envelope(prompt_bytes[HEADER_SIZE:HEADER_SIZE + prompt_length])
+        assert prompt.msg_type == MessageType.CONFIRM_PROMPT
+        assert prompt.payload["target_host"] == "10.0.0.10"
+        assert prompt.payload["target_user"] == "root"
+        assert prompt.payload["system_name"] == "tuto"
+
+    @pytest.mark.asyncio
+    async def test_run_with_named_system_includes_optional_prompt_metadata(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        systems_dir = tmp_path / "pages" / "systems"
+        systems_dir.mkdir(parents=True, exist_ok=True)
+        (systems_dir / "tuto.md").write_text(
+            "---\n"
+            "type: system-info\n"
+            "system_name: tuto\n"
+            "host: 10.0.0.10\n"
+            "hostname: tuto.internal.example\n"
+            "ip_address: 10.0.0.10\n"
+            "user: root\n"
+            "description: Tutorial box for smoke-test runs.\n"
+            "---\n\n"
+            "# Tuto\n",
+            encoding="utf-8",
+        )
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+
+        deny_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="deny-optional-001",
+            timestamp="2026-04-09T12:00:01Z",
+            payload={"approved": False},
+        )
+        deny_frame = encode_frame(deny_reply)
+        client.reader.readexactly = AsyncMock(
+            side_effect=[deny_frame[:4], deny_frame[4:]]
+        )
+
+        envelope = _make_request(payload={
+            "verb": "run",
+            "system_name": "tuto",
+            "natural_language": "run smoke tests",
+        })
+
+        response = await handler.handle_message(envelope, client)
+
+        assert response.msg_type == MessageType.RESPONSE
+        prompt_bytes = b"".join(call.args[0] for call in client.writer.write.call_args_list)
+        prompt_length = unpack_header(prompt_bytes[:HEADER_SIZE])
+        prompt = decode_envelope(prompt_bytes[HEADER_SIZE:HEADER_SIZE + prompt_length])
+        assert prompt.payload["system_hostname"] == "tuto.internal.example"
+        assert prompt.payload["system_ip_address"] == "10.0.0.10"
+        assert prompt.payload["system_description"] == "Tutorial box for smoke-test runs."
 
     @pytest.mark.asyncio
     async def test_run_with_unknown_system_returns_error(

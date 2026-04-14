@@ -8,6 +8,7 @@ the user to type ``root@<ip>`` each time.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 from dataclasses import dataclass
@@ -79,6 +80,8 @@ class SystemInfo:
     aliases: tuple[str, ...] = ()
     key_path: str | None = None
     description: str = ""
+    hostname: str = ""
+    ip_address: str = ""
 
     def __post_init__(self) -> None:
         if not self.system_name.strip():
@@ -100,6 +103,28 @@ class SystemInfo:
             return False
         return normalized == self.normalized_name or normalized in self.aliases
 
+    @property
+    def display_hostname(self) -> str:
+        """Human-readable hostname for prompts, if available."""
+        if self.hostname:
+            return self.hostname
+        try:
+            ipaddress.ip_address(self.host)
+        except ValueError:
+            return self.host
+        return ""
+
+    @property
+    def display_ip_address(self) -> str:
+        """Human-readable IP address for prompts, if available."""
+        if self.ip_address:
+            return self.ip_address
+        try:
+            ipaddress.ip_address(self.host)
+        except ValueError:
+            return ""
+        return self.host
+
 
 def _systems_path(wiki_root: Path) -> Path:
     return wiki_root / SYSTEMS_DIR
@@ -117,6 +142,12 @@ def _from_frontmatter(file_path: Path, fm: dict[str, Any], body: str) -> SystemI
     aliases = _coerce_aliases(fm.get("aliases"))
     key_path = _coerce_string(fm.get("key_path")) or None
     description = _coerce_string(fm.get("description"))
+    hostname = _coerce_string(fm.get("hostname"))
+    ip_address = (
+        _coerce_string(fm.get("ip_address"))
+        or _coerce_string(fm.get("ip"))
+        or _coerce_string(fm.get("address"))
+    )
     if not description and body.strip():
         description = body.splitlines()[0].strip()
     return SystemInfo(
@@ -127,6 +158,8 @@ def _from_frontmatter(file_path: Path, fm: dict[str, Any], body: str) -> SystemI
         aliases=aliases,
         key_path=key_path,
         description=description,
+        hostname=hostname,
+        ip_address=ip_address,
     )
 
 

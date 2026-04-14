@@ -6,6 +6,8 @@ aliases:
   - tutorial
   - tuto-box
 host: 203.0.113.10
+hostname: tuto.internal.example
+ip_address: 203.0.113.10
 user: root
 port: 22
 description: Example system definition. Copy this file and change values.
@@ -31,6 +33,8 @@ system_name: tuto
 aliases:
   - tutorial
 host: 10.0.0.10
+hostname: tuto.internal.example
+ip_address: 10.0.0.10
 user: root
 port: 22
 description: Tutorial box for smoke-test runs.

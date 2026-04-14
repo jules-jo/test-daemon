@@ -34,6 +34,8 @@ system_name: tuto
 aliases:
   - tutorial
 host: 10.0.0.10
+hostname: tuto.internal.example
+ip_address: 10.0.0.10
 user: root
 port: 22
 description: Tutorial box for smoke-test runs.
@@ -71,3 +73,8 @@ There is also a copyable template in this directory:
 
 Copy it to your daemon wiki, rename it to something like `tuto.md`,
 replace the host/user values, and change `type` to `system-info`.
+
+Optional fields:
+
+- `hostname`: human-readable host or DNS name shown in approval prompts
+- `ip_address`: explicit IP shown in approval prompts

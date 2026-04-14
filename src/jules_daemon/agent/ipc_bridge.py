@@ -27,8 +27,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from jules_daemon.ipc.framing import (
     HEADER_SIZE,
@@ -123,6 +124,8 @@ async def _read_envelope(
 
 def make_confirm_callback(
     client: ClientConnection,
+    *,
+    target_context: Mapping[str, Any] | None = None,
 ) -> object:
     """Create an async confirm callback bound to a client connection.
 
@@ -143,18 +146,50 @@ def make_confirm_callback(
         An async callable satisfying the ConfirmCallback protocol.
     """
 
+    def _prompt_target_payload(target_host: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {"target_host": target_host}
+        context = dict(target_context or {})
+        context_host = context.get("target_host")
+        if isinstance(context_host, str) and context_host.strip():
+            if context_host.strip() != target_host.strip():
+                return payload
+        target_user = context.get("target_user")
+        if isinstance(target_user, str) and target_user.strip():
+            payload["target_user"] = target_user.strip()
+        target_port = context.get("target_port")
+        if isinstance(target_port, int):
+            payload["target_port"] = target_port
+        for source_key, payload_key in (
+            ("resolved_system_name", "system_name"),
+            ("resolved_system_hostname", "system_hostname"),
+            ("resolved_system_ip_address", "system_ip_address"),
+            ("resolved_system_description", "system_description"),
+        ):
+            value = context.get(source_key)
+            if isinstance(value, str) and value.strip():
+                payload[payload_key] = value.strip()
+        return payload
+
     async def _confirm(
         command: str,
         target_host: str,
         explanation: str,
     ) -> tuple[bool, str]:
         confirm_msg_id = f"confirm-{uuid.uuid4().hex[:12]}"
+        prompt_payload = _prompt_target_payload(target_host)
+        target_user = prompt_payload.get("target_user", "")
+        target_port = prompt_payload.get("target_port")
+        target_label = target_host
+        if isinstance(target_user, str) and target_user:
+            target_label = f"{target_user}@{target_label}"
+        if isinstance(target_port, int):
+            target_label = f"{target_label}:{target_port}"
         message_text = (
             f"{explanation}\n"
-            f"Execute on {target_host}?\n"
+            f"Execute on {target_label}?\n"
             f"  $ {command}"
         ) if explanation else (
-            f"Execute on {target_host}?\n"
+            f"Execute on {target_label}?\n"
             f"  $ {command}"
         )
 
@@ -164,8 +199,8 @@ def make_confirm_callback(
             timestamp=_now_iso(),
             payload={
                 "proposed_command": command,
-                "target_host": target_host,
                 "message": message_text,
+                **prompt_payload,
             },
         )
 
