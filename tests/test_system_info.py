@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from jules_daemon.wiki.system_info import SYSTEMS_DIR, find_system, list_systems
+from jules_daemon.wiki.system_info import (
+    SYSTEMS_DIR,
+    find_system,
+    find_system_mention,
+    list_systems,
+)
 
 
 def _write_system(
@@ -92,3 +97,37 @@ class TestSystemInfo:
         assert system is not None
         assert system.display_hostname == "tuto.internal.example"
         assert system.display_ip_address == "10.0.0.10"
+
+    def test_find_system_mention_by_primary_name(self, tmp_path: Path) -> None:
+        _write_system(
+            tmp_path,
+            "tuto",
+            frontmatter_text=(
+                "type: system-info\n"
+                "system_name: tuto\n"
+                "host: 10.0.0.10\n"
+                "user: root\n"
+            ),
+        )
+
+        system = find_system_mention(tmp_path, "run the smoke tests in tuto")
+        assert system is not None
+        assert system.system_name == "tuto"
+
+    def test_find_system_mention_by_alias(self, tmp_path: Path) -> None:
+        _write_system(
+            tmp_path,
+            "tutorial-box",
+            frontmatter_text=(
+                "type: system-info\n"
+                "system_name: tutorial-box\n"
+                "aliases:\n"
+                "  - tuto\n"
+                "host: 10.0.0.10\n"
+                "user: root\n"
+            ),
+        )
+
+        system = find_system_mention(tmp_path, "run the smoke tests on tuto")
+        assert system is not None
+        assert system.system_name == "tutorial-box"

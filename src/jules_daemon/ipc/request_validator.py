@@ -399,12 +399,19 @@ def _validate_run_fields(
         parsed["natural_language"] = nl
 
     system_name = _validate_optional_non_empty_string(payload, "system_name", errors)
+    infer_target = payload.get("infer_target") is True
     if system_name is not None:
         parsed["system_name"] = system_name
 
         conflicting_fields = [
             field_name
-            for field_name in ("target_host", "target_user", "target_port", "key_path")
+            for field_name in (
+                "target_host",
+                "target_user",
+                "target_port",
+                "key_path",
+                "infer_target",
+            )
             if payload.get(field_name) is not None
         ]
         if conflicting_fields:
@@ -412,6 +419,24 @@ def _validate_run_fields(
                 field="system_name",
                 message=(
                     "'system_name' cannot be combined with explicit target "
+                    f"fields: {', '.join(conflicting_fields)}"
+                ),
+                code="conflicting_fields",
+            ))
+        return parsed
+
+    if infer_target:
+        parsed["infer_target"] = True
+        conflicting_fields = [
+            field_name
+            for field_name in ("target_host", "target_user", "target_port", "key_path")
+            if payload.get(field_name) is not None
+        ]
+        if conflicting_fields:
+            errors.append(ValidationError(
+                field="infer_target",
+                message=(
+                    "'infer_target' cannot be combined with explicit target "
                     f"fields: {', '.join(conflicting_fields)}"
                 ),
                 code="conflicting_fields",

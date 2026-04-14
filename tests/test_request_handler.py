@@ -1312,6 +1312,60 @@ class TestRequestHandlerRunVerb:
         assert "JULES_SSH_PASSWORD" in prompt.payload["credential_guidance"]
 
     @pytest.mark.asyncio
+    async def test_run_with_inferred_system_resolves_from_wiki(
+        self, tmp_path: Path
+    ) -> None:
+        from jules_daemon.ipc.framing import encode_frame
+
+        systems_dir = tmp_path / "pages" / "systems"
+        systems_dir.mkdir(parents=True, exist_ok=True)
+        (systems_dir / "tuto.md").write_text(
+            "---\n"
+            "type: system-info\n"
+            "system_name: tuto\n"
+            "aliases:\n"
+            "  - tutorial\n"
+            "host: 10.0.0.10\n"
+            "user: root\n"
+            "---\n\n"
+            "# Tuto\n",
+            encoding="utf-8",
+        )
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+
+        deny_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="deny-003",
+            timestamp="2026-04-09T12:00:01Z",
+            payload={"approved": False},
+        )
+        deny_frame = encode_frame(deny_reply)
+        client.reader.readexactly = AsyncMock(
+            side_effect=[deny_frame[:4], deny_frame[4:]]
+        )
+
+        envelope = _make_request(payload={
+            "verb": "run",
+            "infer_target": True,
+            "natural_language": "run the full regression suite in tuto",
+        })
+
+        response = await handler.handle_message(envelope, client)
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["status"] == "denied"
+        prompt_bytes = b"".join(call.args[0] for call in client.writer.write.call_args_list)
+        prompt_length = unpack_header(prompt_bytes[:HEADER_SIZE])
+        prompt = decode_envelope(prompt_bytes[HEADER_SIZE:HEADER_SIZE + prompt_length])
+        assert prompt.msg_type == MessageType.CONFIRM_PROMPT
+        assert prompt.payload["target_host"] == "10.0.0.10"
+        assert prompt.payload["target_user"] == "root"
+        assert prompt.payload["system_name"] == "tuto"
+
+    @pytest.mark.asyncio
     async def test_run_with_named_system_includes_optional_prompt_metadata(
         self,
         tmp_path: Path,
@@ -1421,6 +1475,25 @@ class TestRequestHandlerRunVerb:
 
         assert response.msg_type == MessageType.ERROR
         assert "Unknown system 'missing-box'" in response.payload["error"]
+
+    @pytest.mark.asyncio
+    async def test_run_with_infer_target_and_unknown_system_returns_error(
+        self, tmp_path: Path
+    ) -> None:
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+
+        envelope = _make_request(payload={
+            "verb": "run",
+            "infer_target": True,
+            "natural_language": "run smoke tests in tuto",
+        })
+
+        response = await handler.handle_message(envelope, client)
+
+        assert response.msg_type == MessageType.ERROR
+        assert "Could not infer a named system" in response.payload["error"]
 
 
 # ---------------------------------------------------------------------------

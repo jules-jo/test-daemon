@@ -320,6 +320,7 @@ class ThinClient:
         target_port: int = 22,
         key_path: str | None = None,
         system_name: str | None = None,
+        infer_target: bool = False,
     ) -> CommandResult:
         """Submit a new test execution.
 
@@ -334,6 +335,8 @@ class ThinClient:
             target_port: SSH port. Default 22.
             key_path: Absolute path to SSH private key.
             system_name: Named system alias defined in the wiki.
+            infer_target: Ask the daemon to infer a named system from
+                the natural-language request using its live wiki.
 
         Returns:
             CommandResult with the daemon's run response (which may
@@ -346,13 +349,28 @@ class ThinClient:
                     or target_user is not None
                     or target_port != 22
                     or key_path is not None
+                    or infer_target
                 ):
                     raise ValueError(
-                        "system_name cannot be combined with explicit target fields"
+                        "system_name cannot be combined with explicit target fields or infer_target"
                     )
                 envelope = build_run_request(
                     natural_language=natural_language,
                     system_name=system_name,
+                )
+            elif infer_target:
+                if (
+                    target_host is not None
+                    or target_user is not None
+                    or target_port != 22
+                    or key_path is not None
+                ):
+                    raise ValueError(
+                        "infer_target cannot be combined with explicit target fields"
+                    )
+                envelope = build_run_request(
+                    natural_language=natural_language,
+                    infer_target=True,
                 )
             else:
                 target = SSHTargetParams(

@@ -244,9 +244,11 @@ async def _execute_single(
         # Parse:
         #   run user@host <natural language description>
         #   run --system <name> <natural language description>
+        #   run --infer-target <natural language description>
         if not remaining:
             print("Usage: jules run user@host <description>")
             print("   or: jules run --system <name> <description>")
+            print("   or: jules run --infer-target <description>")
             return 1
 
         if remaining[0] == "--system" or remaining[0].startswith("--system="):
@@ -271,6 +273,15 @@ async def _execute_single(
             result = await client.run(
                 natural_language=natural_language,
                 system_name=system_name,
+            )
+        elif remaining[0] == "--infer-target":
+            if len(remaining) < 2:
+                print("Usage: jules run --infer-target <description>")
+                return 1
+            natural_language = " ".join(remaining[1:])
+            result = await client.run(
+                natural_language=natural_language,
+                infer_target=True,
             )
         else:
             target_spec = remaining[0]
@@ -442,6 +453,8 @@ def _looks_like_structured_run(parts: list[str]) -> bool:
         return len(parts) >= 4 and bool(parts[2].strip())
     if parts[1].startswith("--system="):
         return len(parts) >= 3 and bool(parts[1].partition("=")[2].strip())
+    if parts[1] == "--infer-target":
+        return len(parts) >= 3
     return False
 
 
@@ -509,6 +522,7 @@ def _resolve_natural_language_run(
     target_user = extracted_args.get("target_user")
     target_host = extracted_args.get("target_host")
     system_name = extracted_args.get("system_name")
+    infer_target = extracted_args.get("infer_target") is True
     raw_port = extracted_args.get("target_port", 22)
 
     if isinstance(target_user, str) and isinstance(target_host, str):
@@ -532,12 +546,19 @@ def _resolve_natural_language_run(
             hint="(interpreted as 'run')",
         )
 
+    if infer_target:
+        return _ResolvedInput(
+            parts=("run", "--infer-target", raw),
+            hint="(interpreted as 'run')",
+        )
+
     if not allow_prompt:
         return _ResolvedInput(
             parts=None,
             error=(
                 "Natural-language run requests must include either an SSH target "
-                "like user@host[:port] or a named system like 'in system tuto'."
+                "like user@host[:port] or a named system like 'in tuto' or "
+                "'in system tuto'."
             ),
         )
 
@@ -714,8 +735,11 @@ def _print_help() -> None:
     print("  watch [--run-id ID] [--tail N] Stream output from a run")
     print("  run user@host description     Start a test execution")
     print("  run --system NAME description Start a test execution via system alias")
+    print("  run --infer-target description Ask daemon to infer system alias from NL")
     print("  run the smoke tests on deploy@staging")
     print("                                Natural-language run request")
+    print("  run the smoke tests in tuto")
+    print("                                Natural-language run request via inferred system alias")
     print("  run the smoke tests in system tuto")
     print("                                Natural-language run request via system alias")
     print("  discover user@host command    Auto-discover test spec via -h")

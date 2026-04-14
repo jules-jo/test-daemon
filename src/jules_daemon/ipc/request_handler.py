@@ -1236,6 +1236,37 @@ class RequestHandler:
             resolved["resolved_system_ip_address"] = system.display_ip_address
         return resolved
 
+    def _infer_named_system_from_request(
+        self,
+        parsed: dict[str, Any],
+    ) -> dict[str, Any] | str:
+        """Infer a named system from natural-language text when requested."""
+        if parsed.get("infer_target") is not True:
+            return parsed
+        if parsed.get("target_host") or parsed.get("system_name"):
+            return parsed
+
+        natural_language = parsed.get("natural_language", "")
+        if not isinstance(natural_language, str) or not natural_language.strip():
+            return (
+                "Run requests without an explicit target must include "
+                "natural-language text so Jules can infer the system."
+            )
+
+        from jules_daemon.wiki.system_info import find_system_mention
+
+        system = find_system_mention(self._config.wiki_root, natural_language)
+        if system is None:
+            return (
+                "Could not infer a named system from the run request. "
+                "Use an explicit SSH target like user@host, "
+                "'in system NAME', or a known alias phrase like 'in tuto'."
+            )
+
+        enriched = dict(parsed)
+        enriched["system_name"] = system.system_name
+        return self._resolve_named_system(enriched)
+
     def _build_confirm_target_payload(
         self,
         *,
@@ -1662,7 +1693,10 @@ class RequestHandler:
         Returns:
             RESPONSE envelope with started/completed/denied status.
         """
-        resolved = self._resolve_named_system(parsed)
+        if parsed.get("infer_target") is True:
+            resolved = self._infer_named_system_from_request(parsed)
+        else:
+            resolved = self._resolve_named_system(parsed)
         if isinstance(resolved, str):
             return _build_error_response(
                 msg_id=msg_id,

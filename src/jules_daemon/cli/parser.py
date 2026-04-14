@@ -431,12 +431,13 @@ def _parse_run_args(tokens: list[str]) -> RunArgs | str:
     Syntax:
       run user@host[:port] <natural language> [--port N] [--key PATH]
       run --system NAME <natural language>
+      run --infer-target <natural language>
     """
     positionals, flags = _split_flags_and_positionals(tokens)
 
     err = _check_unknown_flags(
         flags,
-        frozenset({"--port", "--key", "--system"}),
+        frozenset({"--port", "--key", "--system", "--infer-target"}),
         "run",
     )
     if err is not None:
@@ -446,8 +447,21 @@ def _parse_run_args(tokens: list[str]) -> RunArgs | str:
         system_name = _require_flag_value(flags, "--system", "--system")
     except ValueError as exc:
         return str(exc)
+    infer_target = "--infer-target" in flags
+
+    # ``_split_flags_and_positionals()`` is intentionally generic and treats a
+    # non-flag token after any flag as that flag's value. ``--infer-target`` is
+    # a boolean flag, so if the user writes ``run --infer-target run tests`` the
+    # leading ``run`` would otherwise be swallowed. Put it back into the NL
+    # positionals for this verb-specific boolean flag.
+    infer_target_captured = flags.get("--infer-target")
+    if infer_target and infer_target_captured is not None:
+        positionals = [infer_target_captured, *positionals]
+        flags["--infer-target"] = None
 
     if system_name is not None:
+        if infer_target:
+            return "--system cannot be combined with --infer-target"
         if "--port" in flags or "--key" in flags:
             return "--system cannot be combined with --port or --key"
         if not positionals:
@@ -459,6 +473,22 @@ def _parse_run_args(tokens: list[str]) -> RunArgs | str:
             return RunArgs(
                 natural_language=natural_language,
                 system_name=system_name,
+            )
+        except ValueError as exc:
+            return str(exc)
+
+    if infer_target:
+        if "--port" in flags or "--key" in flags:
+            return "--infer-target cannot be combined with --port or --key"
+        if not positionals:
+            return "run requires a natural-language command after --infer-target"
+        if "@" in positionals[0]:
+            return "run cannot combine a user@host target with --infer-target"
+        natural_language = " ".join(positionals)
+        try:
+            return RunArgs(
+                natural_language=natural_language,
+                infer_target=True,
             )
         except ValueError as exc:
             return str(exc)

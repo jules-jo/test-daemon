@@ -21,6 +21,7 @@ __all__ = [
     "SYSTEMS_DIR",
     "SystemInfo",
     "find_system",
+    "find_system_mention",
     "list_systems",
 ]
 
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 SYSTEMS_DIR = "pages/systems"
 _WIKI_TYPE = "system-info"
 _NAME_RE = re.compile(r"[^a-z0-9_.-]+")
+_SYSTEM_MENTION_PREFIXES: tuple[str, ...] = ("in", "on", "at")
 
 
 def _normalize_name(value: str) -> str:
@@ -192,5 +194,40 @@ def find_system(wiki_root: Path, query: str) -> SystemInfo | None:
         return None
     for system in list_systems(wiki_root):
         if system.matches(normalized):
+            return system
+    return None
+
+
+def find_system_mention(wiki_root: Path, text: str) -> SystemInfo | None:
+    """Infer a system from free text like ``run tests in tuto``.
+
+    Matches only known system names/aliases from the wiki, which keeps
+    phrases like ``in parallel`` from becoming false positives unless a
+    real system named ``parallel`` exists.
+    """
+    raw = text.strip()
+    if not raw:
+        return None
+
+    candidates: list[tuple[str, SystemInfo]] = []
+    for system in list_systems(wiki_root):
+        names = [system.normalized_name, *system.aliases]
+        for candidate in names:
+            if candidate:
+                candidates.append((candidate, system))
+
+    # Prefer longer aliases first when one system name is a prefix of another.
+    for candidate, system in sorted(
+        candidates,
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        escaped = re.escape(candidate)
+        prefix = "|".join(re.escape(p) for p in _SYSTEM_MENTION_PREFIXES)
+        pattern = re.compile(
+            rf"\b(?:{prefix})\s+(?:system\s+)?{escaped}(?=$|[\s?.!,;:])",
+            re.IGNORECASE,
+        )
+        if pattern.search(raw):
             return system
     return None

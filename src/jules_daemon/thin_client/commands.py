@@ -234,6 +234,7 @@ def build_run_request(
     target: SSHTargetParams | None = None,
     natural_language: str,
     system_name: str | None = None,
+    infer_target: bool = False,
 ) -> MessageEnvelope:
     """Build a run REQUEST envelope.
 
@@ -241,6 +242,8 @@ def build_run_request(
         target: SSH target connection parameters.
         natural_language: Free-form description of what tests to run.
         system_name: Named system alias defined in ``wiki/pages/systems``.
+        infer_target: Ask the daemon to infer a named system from the
+            natural-language request using its live wiki.
 
     Returns:
         MessageEnvelope for a run command.
@@ -250,9 +253,16 @@ def build_run_request(
     """
     if not natural_language or not natural_language.strip():
         raise ValueError("natural_language must not be empty")
-    if (target is None) == (system_name is None):
+    selected_modes = sum(
+        (
+            target is not None,
+            system_name is not None,
+            infer_target,
+        )
+    )
+    if selected_modes != 1:
         raise ValueError(
-            "Provide exactly one of target or system_name for a run request"
+            "Provide exactly one of target, system_name, or infer_target for a run request"
         )
     if system_name is not None and not system_name.strip():
         raise ValueError("system_name must not be empty")
@@ -263,6 +273,8 @@ def build_run_request(
     }
     if target is not None:
         payload.update(target.to_payload_dict())
+    elif infer_target:
+        payload["infer_target"] = True
     else:
         payload["system_name"] = system_name.strip()  # type: ignore[union-attr]
 

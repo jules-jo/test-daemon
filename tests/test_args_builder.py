@@ -216,6 +216,15 @@ class TestBuildRunArgs:
         assert isinstance(result, RunArgs)
         assert result.system_name == "tuto"
 
+    def test_run_can_be_built_with_infer_target(self) -> None:
+        result = build_verb_args("run", {
+            "infer_target": True,
+            "natural_language": "run the smoke tests in tuto",
+        })
+        assert isinstance(result, RunArgs)
+        assert result.infer_target is True
+        assert result.natural_language == "run the smoke tests in tuto"
+
     def test_empty_host_returns_error(self) -> None:
         result = build_verb_args("run", {
             "target_host": "  ",

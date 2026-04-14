@@ -179,6 +179,10 @@ _SYSTEM_NAME_RE: re.Pattern[str] = re.compile(
     r"\b(?:in|on)\s+system\s+([a-zA-Z0-9_.-]+)\b",
     re.IGNORECASE,
 )
+_IMPLICIT_SYSTEM_NAME_RE: re.Pattern[str] = re.compile(
+    r"\b(?:in|on|at)\s+([a-zA-Z0-9_.-]+)(?:[?.!,;:]*)\s*$",
+    re.IGNORECASE,
+)
 
 # Default verb when nothing matches
 _DEFAULT_VERB: str = "status"
@@ -252,6 +256,20 @@ def _extract_system_name(raw: str) -> dict[str, Any]:
     if match is None:
         return {}
     return {"system_name": match.group(1)}
+
+
+def _extract_infer_target_hint(raw: str) -> dict[str, Any]:
+    """Mark NL requests that likely end with a named-system reference.
+
+    This does not guess the system locally. It simply tells the daemon to
+    try resolving a system mention like ``in tuto`` against its live wiki.
+    """
+    if _SYSTEM_NAME_RE.search(raw):
+        return {}
+    match = _IMPLICIT_SYSTEM_NAME_RE.search(raw)
+    if match is None:
+        return {}
+    return {"infer_target": True}
 
 
 def _select_best_verb(
@@ -331,11 +349,13 @@ def extract_from_natural_language(raw: str) -> NLExtraction:
     # Extract SSH target or named system reference
     ssh_args = _extract_ssh_target(stripped)
     system_args = _extract_system_name(stripped)
+    infer_args = _extract_infer_target_hint(stripped)
 
     # Build extracted_args. For run/queue intents we keep the original
     # free-form text so downstream builders can reuse it as the NL command.
     extracted_args: dict[str, Any] = dict(ssh_args)
     extracted_args.update(system_args)
+    extracted_args.update(infer_args)
     if best_verb in {"run", "queue"}:
         extracted_args["natural_language"] = stripped
 

@@ -470,6 +470,25 @@ class TestThinClientRun:
         assert "target_host" not in sent.payload
 
     @pytest.mark.asyncio
+    async def test_run_with_infer_target(self):
+        """Daemon can infer a named system from NL when requested."""
+        response = _make_response("run", extra={"run_id": "run-new-002b"})
+        conn = _make_mock_connection(responses=[response])
+
+        client = ThinClient()
+        with patch.object(client, "_create_connection", return_value=conn):
+            result = await client.run(
+                natural_language="run unit tests in tuto",
+                infer_target=True,
+            )
+
+        assert result.success is True
+        sent = conn.send.call_args_list[0][0][0]
+        assert sent.payload["infer_target"] is True
+        assert "target_host" not in sent.payload
+        assert "system_name" not in sent.payload
+
+    @pytest.mark.asyncio
     async def test_run_with_confirmation_approved(self):
         """Daemon sends CONFIRM_PROMPT, user approves, daemon responds."""
         prompt = _make_confirm_prompt(command="pytest -v")

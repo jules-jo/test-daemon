@@ -293,8 +293,21 @@ class TestBuildRunRequest:
         assert envelope.payload["system_name"] == "tuto"
         assert "target_host" not in envelope.payload
 
+    def test_run_request_with_infer_target(self):
+        envelope = build_run_request(
+            natural_language="run the unit tests in tuto",
+            infer_target=True,
+        )
+        _assert_valid_envelope(envelope, "run")
+        assert envelope.payload["infer_target"] is True
+        assert "target_host" not in envelope.payload
+        assert "system_name" not in envelope.payload
+
     def test_run_request_rejects_missing_target_selection(self):
-        with pytest.raises(ValueError, match="exactly one of target or system_name"):
+        with pytest.raises(
+            ValueError,
+            match="exactly one of target, system_name, or infer_target",
+        ):
             build_run_request(natural_language="run the unit tests")
 
     def test_run_request_rejects_empty_system_name(self):

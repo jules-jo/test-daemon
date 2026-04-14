@@ -405,6 +405,21 @@ class TestNaturalLanguageDispatch:
         assert result.classification is not None
         assert result.classification.input_type == InputType.NATURAL_LANGUAGE
 
+    @pytest.mark.asyncio
+    async def test_run_request_with_implicit_system_alias(
+        self,
+        full_registry: CommandHandlerRegistry,
+        full_dispatcher: CommandDispatcher,
+    ) -> None:
+        result = await process_input(
+            "run the smoke tests in tuto",
+            registry=full_registry,
+            dispatcher=full_dispatcher,
+        )
+        assert result.success is True
+        assert result.classification is not None
+        assert result.classification.input_type == InputType.NATURAL_LANGUAGE
+
 
 # ---------------------------------------------------------------------------
 # Error handling
