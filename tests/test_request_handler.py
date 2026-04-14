@@ -1729,23 +1729,29 @@ class TestRequestHandlerRunVerb:
         )
         handler._handle_run_oneshot = AsyncMock(return_value=expected)  # type: ignore[method-assign]
 
+        interpret_mock = AsyncMock(return_value={
+            "system_name": "tuto",
+            "natural_language": "run smoke tests. 1 iteration",
+        })
+
         with patch.object(
             handler,
             "_interpret_run_request_with_llm",
-            AsyncMock(return_value={
-                "system_name": "tuto",
-                "natural_language": "run smoke tests. 1 iteration",
-            }),
+            interpret_mock,
         ):
             envelope = _make_request(payload={
                 "verb": "run",
                 "interpret_request": True,
                 "natural_language": "run smoke tests in tuto. 1 iteration",
+                "agent_original_user_input": "please run smoke tests in tuto. 1 iteration",
             })
 
             response = await handler.handle_message(envelope, client)
 
         assert response == expected
+        assert interpret_mock.await_args.kwargs["natural_language"] == (
+            "please run smoke tests in tuto. 1 iteration"
+        )
         run_args = handler._handle_run_oneshot.await_args.args[1]
         assert run_args["target_host"] == "10.0.0.10"
         assert run_args["target_user"] == "root"
@@ -1920,6 +1926,7 @@ class TestRequestHandlerInterpretVerb:
         assert response == expected
         parsed_run = run_handler.await_args.args[1]
         assert parsed_run["natural_language"] == "run the smoke tests"
+        assert parsed_run["agent_original_user_input"] == "run the smoke tests in tuto"
         assert parsed_run["interpret_request"] is True
 
     @pytest.mark.asyncio

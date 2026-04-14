@@ -407,6 +407,20 @@ class TestValidateRequestRunFields:
         assert result.is_valid is True
         assert result.parsed_payload["interpret_request"] is True
 
+    def test_run_valid_with_agent_original_user_input(self) -> None:
+        envelope = _make_envelope(payload={
+            "verb": "run",
+            "interpret_request": True,
+            "natural_language": "run smoke tests",
+            "agent_original_user_input": "please run smoke tests in tuto",
+        })
+        result = validate_request(envelope)
+        assert result.is_valid is True
+        assert (
+            result.parsed_payload["agent_original_user_input"]
+            == "please run smoke tests in tuto"
+        )
+
     def test_run_system_name_conflicts_with_explicit_target(self) -> None:
         envelope = _make_envelope(payload={
             "verb": "run",

@@ -399,6 +399,14 @@ def _validate_run_fields(
     if nl is not None:
         parsed["natural_language"] = nl
 
+    agent_original_user_input = _validate_optional_non_empty_string(
+        payload,
+        "agent_original_user_input",
+        errors,
+    )
+    if agent_original_user_input is not None:
+        parsed["agent_original_user_input"] = agent_original_user_input
+
     system_name = _validate_optional_non_empty_string(payload, "system_name", errors)
     infer_target = payload.get("infer_target") is True
     interpret_request = payload.get("interpret_request") is True

@@ -547,6 +547,78 @@ class TestAgentLoopResponseHandling:
         mock_loop_instance.run.assert_awaited_once_with("run the smoke tests")
 
     @pytest.mark.asyncio
+    async def test_agent_loop_receives_original_user_wording_for_arg_clarification(
+        self, tmp_path: Path,
+    ) -> None:
+        """Original wording should be preserved when daemon interpretation normalized it."""
+        from jules_daemon.agent.agent_loop import (
+            AgentLoopResult,
+            AgentLoopState,
+        )
+
+        config = RequestHandlerConfig(
+            wiki_root=tmp_path,
+            llm_client=_make_llm_client(),
+            llm_config=_make_llm_config(),
+        )
+        handler = RequestHandler(config=config)
+        client = _make_client()
+
+        mock_result = AgentLoopResult(
+            final_state=AgentLoopState.COMPLETE,
+            iterations_used=1,
+            history=(
+                {"role": "system", "content": "..."},
+                {"role": "user", "content": "run the smoke tests"},
+            ),
+            error_message=None,
+        )
+
+        with patch(
+            "jules_daemon.agent.agent_loop.AgentLoop",
+        ) as MockAgentLoop:
+            mock_loop_instance = AsyncMock()
+            mock_loop_instance.run.return_value = mock_result
+            MockAgentLoop.return_value = mock_loop_instance
+
+            with patch(
+                "jules_daemon.agent.tools.registry_factory.build_tool_set",
+            ) as mock_build:
+                mock_build.return_value = ()
+
+                with patch(
+                    "jules_daemon.agent.llm_adapter.OpenAILLMAdapter",
+                ):
+                    with patch(
+                        "jules_daemon.agent.tool_registry.ToolRegistry",
+                    ) as MockRegistry:
+                        mock_reg = MagicMock()
+                        mock_reg.to_openai_schemas.return_value = ()
+                        mock_reg.list_tool_names.return_value = ()
+                        MockRegistry.return_value = mock_reg
+
+                        envelope = _make_request(payload={
+                            "verb": "run",
+                            "target_host": "staging.example.com",
+                            "target_user": "deploy",
+                            "natural_language": "run test A with iteration=1",
+                            "agent_original_user_input": (
+                                "please run test A in tuto with itreation=1"
+                            ),
+                        })
+
+                        response = await handler.handle_message(
+                            envelope, client,
+                        )
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["status"] == "completed"
+        agent_message = mock_loop_instance.run.await_args.args[0]
+        assert "Resolved request after daemon-side routing" in agent_message
+        assert "run test A with iteration=1" in agent_message
+        assert "please run test A in tuto with itreation=1" in agent_message
+
+    @pytest.mark.asyncio
     async def test_agent_loop_complete_returns_started_for_background_run(
         self, tmp_path: Path,
     ) -> None:
@@ -800,6 +872,8 @@ class TestBuildAgentSystemPrompt:
         assert "approval" in prompt.lower()
         assert "ask_user_question" in prompt
         assert "resolved system alias" in prompt.lower()
+        assert "malformed" in prompt.lower()
+        assert "misspelled" in prompt.lower()
 
     def test_includes_wiki_context_when_available(
         self, tmp_path: Path,

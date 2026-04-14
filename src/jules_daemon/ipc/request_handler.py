@@ -694,6 +694,9 @@ class RequestHandler:
         if intent.verb.value == "run":
             natural_language = _non_empty_str("natural_language") or source_input.strip()
             payload["natural_language"] = natural_language
+            source_text = source_input.strip()
+            if source_text and source_text != natural_language:
+                payload["agent_original_user_input"] = source_text
             target_host = _non_empty_str("target_host")
             target_user = _non_empty_str("target_user")
             system_name = _non_empty_str("system_name")
@@ -1704,6 +1707,9 @@ class RequestHandler:
             return self._resolve_named_system(parsed)
 
         original_natural_language = str(parsed.get("natural_language", "")).strip()
+        agent_original_user_input = str(
+            parsed.get("agent_original_user_input", "")
+        ).strip()
         if not original_natural_language:
             return "Run requests require natural-language text."
 
@@ -1715,7 +1721,7 @@ class RequestHandler:
         if parsed.get("interpret_request") is True or parsed.get("infer_target") is True:
             followup_natural_language = original_natural_language
             interpreted = await self._interpret_run_request_with_llm(
-                natural_language=original_natural_language,
+                natural_language=agent_original_user_input or original_natural_language,
             )
             if interpreted is not None:
                 candidate = dict(parsed)
@@ -2448,9 +2454,25 @@ class RequestHandler:
         from jules_daemon.agent.tools.registry_factory import build_tool_set
 
         natural_language = parsed.get("natural_language", "")
+        agent_original_user_input = str(
+            parsed.get("agent_original_user_input", "")
+        ).strip()
         target_host = parsed.get("target_host", "")
         target_user = parsed.get("target_user", "")
         target_port = parsed.get("target_port", 22)
+        agent_user_message = natural_language
+        if (
+            agent_original_user_input
+            and agent_original_user_input != natural_language
+        ):
+            agent_user_message = (
+                "Resolved request after daemon-side routing:\n"
+                f"{natural_language}\n\n"
+                "Original user wording (use only to recover malformed or "
+                "ambiguous argument wording; ignore SSH target aliases or "
+                "transport phrases already resolved by the daemon):\n"
+                f"{agent_original_user_input}"
+            )
 
         logger.info(
             "Starting agent loop for msg_id=%s: '%s' on %s@%s:%d",
@@ -2544,7 +2566,7 @@ class RequestHandler:
             config=loop_config,
         )
 
-        result = await agent_loop.run(natural_language)
+        result = await agent_loop.run(agent_user_message)
 
         logger.info(
             "Agent loop finished for msg_id=%s: state=%s, "
@@ -2839,6 +2861,10 @@ class RequestHandler:
             "'in tuto' or 'in system tuto', treat that as transport "
             "metadata that has already been handled. Do NOT ask the user "
             "what a resolved system alias means.",
+            "- If the user seems to have provided an argument, but the "
+            "argument name or value looks malformed, misspelled, ambiguous, "
+            "or inconsistent with the test spec, call ask_user_question to "
+            "clarify it instead of silently coercing it.",
             "- NEVER auto-default or guess required arguments. ALWAYS ask.",
         ]
 
