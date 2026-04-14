@@ -654,3 +654,33 @@ class TestDiscoverTestAsync:
                     credential=None,
                     command="/root/step.py",
                 )
+
+    @pytest.mark.asyncio
+    async def test_fetch_help_text_raises_probe_error_with_root_cause(self) -> None:
+        from jules_daemon.execution.test_discovery import (
+            DiscoveryProbeError,
+            _fetch_help_text,
+        )
+
+        with patch(
+            "jules_daemon.execution.test_discovery._run_help_via_paramiko",
+            side_effect=[
+                (1, "", "python3: can't open file '/root/step.py': [Errno 2]"),
+                (1, "", "python3: can't open file '/root/step.py': [Errno 2]"),
+            ],
+        ):
+            with pytest.raises(DiscoveryProbeError) as exc_info:
+                await _fetch_help_text(
+                    host="10.0.0.1",
+                    port=22,
+                    username="root",
+                    credential=None,
+                    command="python3 /root/step.py",
+                )
+
+        err = exc_info.value
+        assert err.executed_command == "python3 /root/step.py"
+        assert err.exit_code == 1
+        assert err.last_attempted_command == "python3 /root/step.py --help"
+        assert "can't open file" in err.summary_text
+        assert "exited with code 1" in err.format_user_message()

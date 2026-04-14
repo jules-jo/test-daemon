@@ -2279,6 +2279,157 @@ class TestRequestHandlerDiscoverVerb:
         assert len(confirm_prompts) == 1
         assert confirm_prompts[0].payload["proposed_command"] == "python3 /root/step.py -h"
 
+    @pytest.mark.asyncio
+    async def test_discover_probe_failure_explains_reason_before_python_fallback(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from jules_daemon.execution.test_discovery import (
+            DiscoveryProbeError,
+            DiscoveredTestSpec,
+        )
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+
+        approve_python3_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="discover-pre-python3-reply",
+            timestamp="2026-04-09T12:00:01Z",
+            payload={"approved": True},
+        )
+        approve_python_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="discover-pre-python-reply",
+            timestamp="2026-04-09T12:00:02Z",
+            payload={"approved": True},
+        )
+        save_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="discover-save-reply",
+            timestamp="2026-04-09T12:00:03Z",
+            payload={"approved": True},
+        )
+        frames = [
+            encode_frame(approve_python3_reply),
+            encode_frame(approve_python_reply),
+            encode_frame(save_reply),
+        ]
+        client.reader.readexactly = AsyncMock(
+            side_effect=[
+                frames[0][:4], frames[0][4:],
+                frames[1][:4], frames[1][4:],
+                frames[2][:4], frames[2][4:],
+            ],
+        )
+
+        sent_frames: list[bytes] = []
+
+        def _capture_write(data: bytes) -> None:
+            sent_frames.append(data)
+
+        client.writer.write = _capture_write
+
+        with patch(
+            "jules_daemon.ipc.request_handler.discover_test",
+            AsyncMock(side_effect=[
+                DiscoveryProbeError(
+                    executed_command="python3 /root/step.py",
+                    attempted_help_commands=(
+                        "python3 /root/step.py -h",
+                        "python3 /root/step.py --help",
+                    ),
+                    exit_code=1,
+                    stdout_text="",
+                    stderr_text="python3: command not found",
+                ),
+                DiscoveredTestSpec(
+                    command_template="python /root/step.py",
+                    required_args=(),
+                    optional_args=(),
+                    arg_descriptions={},
+                    typical_duration=None,
+                    raw_help_text="usage: step.py [-h]",
+                ),
+            ]),
+        ), patch(
+            "jules_daemon.ipc.request_handler.save_discovered_spec",
+            return_value=tmp_path / "pages" / "daemon" / "knowledge" / "test-step.md",
+        ):
+            response = await handler.handle_message(
+                _make_request(payload={
+                    "verb": "discover",
+                    "target_host": "10.0.0.10",
+                    "target_user": "root",
+                    "command": "/root/step.py",
+                }),
+                client,
+            )
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["status"] == "saved"
+
+        envelopes = [
+            decode_envelope(frame[HEADER_SIZE:]) for frame in sent_frames
+        ]
+        stream_lines = [
+            env.payload["line"]
+            for env in envelopes
+            if env.msg_type == MessageType.STREAM and "line" in env.payload
+        ]
+        assert any("python3: command not found" in line for line in stream_lines)
+        assert any("python /root/step.py -h" in line for line in stream_lines)
+
+    @pytest.mark.asyncio
+    async def test_discover_final_probe_failure_includes_root_cause(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from jules_daemon.execution.test_discovery import DiscoveryProbeError
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+
+        approve_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="discover-pre-reply",
+            timestamp="2026-04-09T12:00:01Z",
+            payload={"approved": True},
+        )
+        frame = encode_frame(approve_reply)
+        client.reader.readexactly = AsyncMock(
+            side_effect=[frame[:4], frame[4:]],
+        )
+
+        with patch(
+            "jules_daemon.ipc.request_handler.discover_test",
+            AsyncMock(side_effect=DiscoveryProbeError(
+                executed_command="python3 /root/step.py",
+                attempted_help_commands=(
+                    "python3 /root/step.py -h",
+                    "python3 /root/step.py --help",
+                ),
+                exit_code=1,
+                stdout_text="",
+                stderr_text="permission denied",
+            )),
+        ):
+            response = await handler.handle_message(
+                _make_request(payload={
+                    "verb": "discover",
+                    "target_host": "10.0.0.10",
+                    "target_user": "root",
+                    "command": "python3 /root/step.py",
+                }),
+                client,
+            )
+
+        assert response.msg_type == MessageType.ERROR
+        assert "permission denied" in response.payload["error"]
+        assert "exited with code 1" in response.payload["error"]
+
 
 # ---------------------------------------------------------------------------
 # RequestHandler: response correlation

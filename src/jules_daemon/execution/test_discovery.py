@@ -44,6 +44,7 @@ from jules_daemon.wiki.frontmatter import WikiDocument
 from jules_daemon.wiki.test_knowledge import KNOWLEDGE_DIR, derive_test_slug
 
 __all__ = [
+    "DiscoveryProbeError",
     "DiscoveredTestSpec",
     "build_discovery_help_command",
     "build_discovery_help_commands",
@@ -133,6 +134,59 @@ class _HelpProbeResult:
 
     help_text: str
     executed_command: str
+
+
+class DiscoveryProbeError(RuntimeError):
+    """A remote help probe ran but did not yield usable help output."""
+
+    def __init__(
+        self,
+        *,
+        executed_command: str,
+        attempted_help_commands: tuple[str, ...],
+        exit_code: int | None,
+        stdout_text: str,
+        stderr_text: str,
+    ) -> None:
+        self.executed_command = executed_command
+        self.attempted_help_commands = attempted_help_commands
+        self.exit_code = exit_code
+        self.stdout_text = stdout_text
+        self.stderr_text = stderr_text
+        super().__init__(self.format_user_message())
+
+    @property
+    def last_attempted_command(self) -> str:
+        if self.attempted_help_commands:
+            return self.attempted_help_commands[-1]
+        return self.executed_command
+
+    @property
+    def summary_text(self) -> str:
+        for raw_text in (self.stderr_text, self.stdout_text):
+            for line in raw_text.splitlines():
+                stripped = line.strip()
+                if stripped:
+                    if len(stripped) > 240:
+                        return stripped[:237] + "..."
+                    return stripped
+        return ""
+
+    def format_user_message(self) -> str:
+        command_display = self.last_attempted_command
+        if self.summary_text:
+            if self.exit_code is not None:
+                return (
+                    f"{command_display!r} exited with code {self.exit_code}: "
+                    f"{self.summary_text}"
+                )
+            return f"{command_display!r} failed: {self.summary_text}"
+        if self.exit_code is not None:
+            return (
+                f"{command_display!r} exited with code {self.exit_code} "
+                "and produced no usable output"
+            )
+        return f"{command_display!r} failed without usable output"
 
 
 def normalize_discovery_command(command: str) -> str:
@@ -290,15 +344,19 @@ async def _fetch_help_text(
         SSHAuthenticationError: When SSH authentication fails.
         SSHConnectionError: When the SSH connection itself fails.
     """
-    last_combined = ""
-    last_candidate = ""
+    last_probe_error: DiscoveryProbeError | None = None
     candidates = resolve_discovery_command_candidates(command)
 
     for candidate in candidates:
         candidate_help: _HelpProbeResult | None = None
+        attempted_help_commands: list[str] = []
+        last_exit_code: int | None = None
+        last_stdout = ""
+        last_stderr = ""
 
         for flag in ("-h", "--help"):
             full_cmd = f"{candidate} {flag}"
+            attempted_help_commands.append(full_cmd)
             logger.info("Running help command: %s@%s: %s", username, host, full_cmd)
             try:
                 exit_code, stdout, stderr = await asyncio.to_thread(
@@ -316,10 +374,10 @@ async def _fetch_help_text(
                 logger.warning("Unexpected error fetching help: %s", exc)
                 return None
 
+            last_exit_code = exit_code
+            last_stdout = stdout
+            last_stderr = stderr
             combined = (stdout + "\n" + stderr).strip()
-            if combined:
-                last_combined = combined
-                last_candidate = candidate
 
             if exit_code == 0 and combined:
                 return _HelpProbeResult(
@@ -343,6 +401,15 @@ async def _fetch_help_text(
         if candidate_help is not None:
             return candidate_help
 
+        if attempted_help_commands:
+            last_probe_error = DiscoveryProbeError(
+                executed_command=candidate,
+                attempted_help_commands=tuple(attempted_help_commands),
+                exit_code=last_exit_code,
+                stdout_text=last_stdout,
+                stderr_text=last_stderr,
+            )
+
         if len(candidates) > 1:
             logger.debug(
                 "Discovery candidate failed without usable help output, "
@@ -350,11 +417,8 @@ async def _fetch_help_text(
                 candidate,
             )
 
-    if last_combined:
-        return _HelpProbeResult(
-            help_text=last_combined,
-            executed_command=last_candidate or command.strip(),
-        )
+    if last_probe_error is not None:
+        raise last_probe_error
 
     return None
 
@@ -483,6 +547,7 @@ async def discover_test(
     Raises:
         SSHAuthenticationError: When SSH authentication fails.
         SSHConnectionError: When the SSH connection itself fails.
+        DiscoveryProbeError: When the remote help probe ran but failed.
     """
     credential = resolve_ssh_credentials(host)
     help_result = await _fetch_help_text(

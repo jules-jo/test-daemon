@@ -144,6 +144,7 @@ from jules_daemon.ssh.credentials import (
 from jules_daemon.wiki import current_run as current_run_io
 from jules_daemon.wiki.command_queue import CommandQueue
 from jules_daemon.execution.test_discovery import (
+    DiscoveryProbeError,
     DiscoveredTestSpec,
     build_discovery_help_command,
     discover_test,
@@ -2010,6 +2011,7 @@ class RequestHandler:
         # Step 1: Ask permission before each actual remote discovery attempt.
         spec: DiscoveredTestSpec | None = None
         attempted_commands: list[str] = []
+        last_probe_error: DiscoveryProbeError | None = None
         command_candidates = resolve_discovery_command_candidates(command)
         if not command_candidates:
             command_candidates = (command,)
@@ -2023,15 +2025,22 @@ class RequestHandler:
             attempted_commands.append(candidate)
 
             if index > 0:
+                fallback_reason = ""
+                if last_probe_error is not None:
+                    fallback_reason = (
+                        f" The previous attempt failed because "
+                        f"{last_probe_error.format_user_message()}."
+                    )
                 fallback_msg = MessageEnvelope(
                     msg_type=MessageType.STREAM,
                     msg_id=f"discover-fallback-{uuid.uuid4().hex[:12]}",
                     timestamp=_now_iso(),
                     payload={
                         "line": (
-                            f"\nNo usable help output was found from the previous "
-                            f"discovery attempt. Jules can try the fallback command "
-                            f"'{primary_help_command}' next.\n"
+                            f"\nThe previous discovery attempt did not yield usable "
+                            f"help output. Jules can try the fallback command "
+                            f"'{primary_help_command}' next."
+                            f"{fallback_reason}\n"
                         ),
                         "is_end": False,
                     },
@@ -2110,6 +2119,17 @@ class RequestHandler:
                     llm_client=self._config.llm_client,
                     llm_config=self._config.llm_config,
                 )
+            except DiscoveryProbeError as exc:
+                last_probe_error = exc
+                logger.warning(
+                    "Discovery probe failed for msg_id=%s on %s: %s",
+                    msg_id,
+                    candidate,
+                    exc,
+                )
+                if index + 1 < len(command_candidates):
+                    continue
+                break
             except Exception as exc:
                 logger.error("Discovery failed for msg_id=%s: %s", msg_id, exc)
                 return _build_error_response(
@@ -2125,11 +2145,15 @@ class RequestHandler:
             attempted_display = ", ".join(
                 f"'{cmd}'" for cmd in attempted_commands
             ) or f"'{command}'"
+            probe_suffix = ""
+            if last_probe_error is not None:
+                probe_suffix = f": {last_probe_error.format_user_message()}"
             return _build_error_response(
                 msg_id=msg_id,
                 error_summary=(
                     f"Could not fetch help output for {attempted_display} "
                     f"on {target_user}@{target_host}:{target_port}"
+                    f"{probe_suffix}"
                 ),
                 validation_errors=[],
             )
