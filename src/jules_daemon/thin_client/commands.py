@@ -235,6 +235,7 @@ def build_run_request(
     natural_language: str,
     system_name: str | None = None,
     infer_target: bool = False,
+    interpret_request: bool = False,
 ) -> MessageEnvelope:
     """Build a run REQUEST envelope.
 
@@ -244,6 +245,9 @@ def build_run_request(
         system_name: Named system alias defined in ``wiki/pages/systems``.
         infer_target: Ask the daemon to infer a named system from the
             natural-language request using its live wiki.
+        interpret_request: Ask the daemon to use its LLM-assisted
+            interpretation fallback for unresolved conversational run
+            requests.
 
     Returns:
         MessageEnvelope for a run command.
@@ -258,11 +262,12 @@ def build_run_request(
             target is not None,
             system_name is not None,
             infer_target,
+            interpret_request,
         )
     )
     if selected_modes != 1:
         raise ValueError(
-            "Provide exactly one of target, system_name, or infer_target for a run request"
+            "Provide exactly one of target, system_name, infer_target, or interpret_request for a run request"
         )
     if system_name is not None and not system_name.strip():
         raise ValueError("system_name must not be empty")
@@ -275,6 +280,8 @@ def build_run_request(
         payload.update(target.to_payload_dict())
     elif infer_target:
         payload["infer_target"] = True
+    elif interpret_request:
+        payload["interpret_request"] = True
     else:
         payload["system_name"] = system_name.strip()  # type: ignore[union-attr]
 

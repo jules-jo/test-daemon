@@ -489,6 +489,25 @@ class TestThinClientRun:
         assert "system_name" not in sent.payload
 
     @pytest.mark.asyncio
+    async def test_run_with_interpret_request(self):
+        """Daemon can interpret unresolved conversational runs."""
+        response = _make_response("run", extra={"run_id": "run-new-002c"})
+        conn = _make_mock_connection(responses=[response])
+
+        client = ThinClient()
+        with patch.object(client, "_create_connection", return_value=conn):
+            result = await client.run(
+                natural_language="run the unit tests",
+                interpret_request=True,
+            )
+
+        assert result.success is True
+        sent = conn.send.call_args_list[0][0][0]
+        assert sent.payload["interpret_request"] is True
+        assert "target_host" not in sent.payload
+        assert "system_name" not in sent.payload
+
+    @pytest.mark.asyncio
     async def test_run_with_confirmation_approved(self):
         """Daemon sends CONFIRM_PROMPT, user approves, daemon responds."""
         prompt = _make_confirm_prompt(command="pytest -v")

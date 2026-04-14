@@ -317,6 +317,12 @@ class TestParseRun:
         assert result.args.infer_target is True
         assert result.args.natural_language == "run the tests in tuto"
 
+    def test_run_with_interpret_request(self) -> None:
+        result = parse_command("run --interpret-request run the tests")
+        assert isinstance(result, ParsedCommand)
+        assert result.args.interpret_request is True
+        assert result.args.natural_language == "run the tests"
+
     def test_run_with_port_flag(self) -> None:
         result = parse_command("run deploy@host run tests --port 2222")
         assert isinstance(result, ParsedCommand)

@@ -245,10 +245,12 @@ async def _execute_single(
         #   run user@host <natural language description>
         #   run --system <name> <natural language description>
         #   run --infer-target <natural language description>
+        #   run --interpret-request <natural language description>
         if not remaining:
             print("Usage: jules run user@host <description>")
             print("   or: jules run --system <name> <description>")
             print("   or: jules run --infer-target <description>")
+            print("   or: jules run --interpret-request <description>")
             return 1
 
         if remaining[0] == "--system" or remaining[0].startswith("--system="):
@@ -282,6 +284,15 @@ async def _execute_single(
             result = await client.run(
                 natural_language=natural_language,
                 infer_target=True,
+            )
+        elif remaining[0] == "--interpret-request":
+            if len(remaining) < 2:
+                print("Usage: jules run --interpret-request <description>")
+                return 1
+            natural_language = " ".join(remaining[1:])
+            result = await client.run(
+                natural_language=natural_language,
+                interpret_request=True,
             )
         else:
             target_spec = remaining[0]
@@ -455,6 +466,8 @@ def _looks_like_structured_run(parts: list[str]) -> bool:
         return len(parts) >= 3 and bool(parts[1].partition("=")[2].strip())
     if parts[1] == "--infer-target":
         return len(parts) >= 3
+    if parts[1] == "--interpret-request":
+        return len(parts) >= 3
     return False
 
 
@@ -552,23 +565,8 @@ def _resolve_natural_language_run(
             hint="(interpreted as 'run')",
         )
 
-    if not allow_prompt:
-        return _ResolvedInput(
-            parts=None,
-            error=(
-                "Natural-language run requests must include either an SSH target "
-                "like user@host[:port] or a named system like 'in tuto' or "
-                "'in system tuto'."
-            ),
-        )
-
-    prompted = _prompt_for_target()
-    if prompted is None:
-        return _ResolvedInput(parts=None, error="Run cancelled.")
-
-    user, host, port = prompted
     return _ResolvedInput(
-        parts=("run", _format_target_spec(user, host, port), raw),
+        parts=("run", "--interpret-request", raw),
         hint="(interpreted as 'run')",
     )
 
@@ -736,6 +734,8 @@ def _print_help() -> None:
     print("  run user@host description     Start a test execution")
     print("  run --system NAME description Start a test execution via system alias")
     print("  run --infer-target description Ask daemon to infer system alias from NL")
+    print("  run --interpret-request description")
+    print("                                Ask daemon to interpret unresolved run prompts")
     print("  run the smoke tests on deploy@staging")
     print("                                Natural-language run request")
     print("  run the smoke tests in tuto")

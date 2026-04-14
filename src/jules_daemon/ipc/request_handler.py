@@ -609,6 +609,14 @@ class RequestHandler:
             return False
         return True
 
+    @property
+    def _can_use_llm_interpretation(self) -> bool:
+        """True when daemon-side LLM interpretation helpers are available."""
+        return (
+            self._config.llm_client is not None
+            and self._config.llm_config is not None
+        )
+
     async def handle_message(
         self,
         envelope: MessageEnvelope,
@@ -1011,6 +1019,123 @@ class RequestHandler:
 
     # -- LLM translation helper --
 
+    async def _interpret_run_request_with_llm(
+        self,
+        *,
+        natural_language: str,
+    ) -> dict[str, Any] | None:
+        """Use the LLM to interpret an unresolved run request.
+
+        Returns a partial parsed-payload dict with any of:
+        ``system_name``, ``target_user``, ``target_host``, ``target_port``,
+        ``natural_language`` (cleaned task text), and ``followup_question``.
+        """
+        if not self._can_use_llm_interpretation:
+            return None
+
+        from jules_daemon.llm.client import create_completion
+        from jules_daemon.llm.response_parser import extract_json_from_text
+        from jules_daemon.wiki.system_info import list_systems
+
+        systems = await self._run_blocking(list_systems, self._config.wiki_root)
+        system_lines = ["Known named systems:"]
+        if systems:
+            for system in systems:
+                aliases = ", ".join(system.aliases) if system.aliases else "(none)"
+                system_lines.append(
+                    f"- {system.system_name} | aliases: {aliases} | "
+                    f"endpoint: {system.user}@{system.host}:{system.port}"
+                )
+        else:
+            system_lines.append("- none")
+
+        system_prompt = "\n".join([
+            "You interpret unresolved Jules run requests.",
+            "Separate transport target information from the actual test request.",
+            "Return JSON only with this schema:",
+            "{",
+            '  "system_name": string|null,',
+            '  "target_user": string|null,',
+            '  "target_host": string|null,',
+            '  "target_port": integer|null,',
+            '  "cleaned_request": string,',
+            '  "followup_question": string|null,',
+            '  "reasoning": string',
+            "}",
+            "Rules:",
+            "- Prefer system_name when the request refers to a known named system.",
+            "- Only use system_name values that appear in the provided known systems list.",
+            "- Only set target_user/target_host/target_port when the user explicitly provided an SSH target.",
+            "- cleaned_request must keep the test intent and arguments but remove target phrases.",
+            "- If you cannot determine a valid target confidently, set followup_question to a short question asking for the target and leave system_name/target_user/target_host null.",
+            "- Never invent system names, users, hosts, or ports.",
+        ])
+        user_prompt = "\n".join([
+            f"Raw request: {natural_language}",
+            "",
+            *system_lines,
+        ])
+
+        def _call_completion() -> Any:
+            return create_completion(
+                client=self._config.llm_client,  # type: ignore[arg-type]
+                config=self._config.llm_config,  # type: ignore[arg-type]
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.0,
+            )
+
+        try:
+            completion = await self._run_blocking(_call_completion)
+            if not getattr(completion, "choices", None):
+                return None
+            content = completion.choices[0].message.content or ""
+            if not content:
+                return None
+            data = extract_json_from_text(content)
+        except Exception as exc:
+            logger.warning(
+                "LLM run-request interpretation failed for '%s': %s",
+                natural_language[:80],
+                exc,
+            )
+            return None
+
+        interpreted: dict[str, Any] = {}
+        system_name = data.get("system_name")
+        if isinstance(system_name, str) and system_name.strip():
+            interpreted["system_name"] = system_name.strip()
+
+        target_user = data.get("target_user")
+        target_host = data.get("target_host")
+        if (
+            isinstance(target_user, str) and target_user.strip()
+            and isinstance(target_host, str) and target_host.strip()
+        ):
+            interpreted["target_user"] = target_user.strip()
+            interpreted["target_host"] = target_host.strip()
+            target_port = data.get("target_port")
+            if isinstance(target_port, int) and 1 <= target_port <= 65535:
+                interpreted["target_port"] = target_port
+            else:
+                interpreted["target_port"] = 22
+
+        cleaned_request = data.get("cleaned_request")
+        if isinstance(cleaned_request, str) and cleaned_request.strip():
+            interpreted["natural_language"] = cleaned_request.strip()
+
+        followup_question = data.get("followup_question")
+        if isinstance(followup_question, str) and followup_question.strip():
+            interpreted["followup_question"] = followup_question.strip()
+
+        reasoning = data.get("reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            interpreted["interpretation_reasoning"] = reasoning.strip()
+
+        return interpreted or None
+
     async def _translate_via_llm(
         self,
         *,
@@ -1241,6 +1366,140 @@ class RequestHandler:
         if system.display_ip_address:
             resolved["resolved_system_ip_address"] = system.display_ip_address
         return resolved
+
+    def _resolve_target_clarification(
+        self,
+        *,
+        answer: str,
+        natural_language: str,
+    ) -> dict[str, Any] | str:
+        """Resolve a user's follow-up answer into a target selection."""
+        from jules_daemon.classifier.nl_extractor import extract_from_natural_language
+        from jules_daemon.wiki.system_info import find_system, find_system_mention
+
+        raw = answer.strip()
+        if not raw:
+            return "Run cancelled."
+
+        system = find_system(self._config.wiki_root, raw)
+        if system is None:
+            system = find_system_mention(self._config.wiki_root, raw)
+        if system is not None:
+            return self._resolve_named_system({
+                "system_name": system.system_name,
+                "natural_language": natural_language,
+            })
+
+        extraction = extract_from_natural_language(raw)
+        target_user = extraction.extracted_args.get("target_user")
+        target_host = extraction.extracted_args.get("target_host")
+        if (
+            isinstance(target_user, str) and target_user.strip()
+            and isinstance(target_host, str) and target_host.strip()
+        ):
+            raw_port = extraction.extracted_args.get("target_port", 22)
+            try:
+                target_port = int(raw_port)
+            except (TypeError, ValueError):
+                target_port = 22
+            return {
+                "natural_language": natural_language,
+                "target_user": target_user.strip(),
+                "target_host": target_host.strip(),
+                "target_port": target_port,
+            }
+
+        return (
+            "Could not resolve a named system or SSH target from your answer. "
+            "Please answer with a named system like 'tuto' or an SSH target "
+            "like 'root@10.0.0.10'."
+        )
+
+    async def _ask_for_run_target(
+        self,
+        *,
+        client: ClientConnection,
+        natural_language: str,
+        question: str | None = None,
+    ) -> dict[str, Any] | str:
+        """Ask the user for missing target information for a run request."""
+        from jules_daemon.agent.ipc_bridge import make_ask_callback
+
+        ask_cb = make_ask_callback(client)
+        answer = await ask_cb(
+            question or "Which named system or SSH target should I use for this run?",
+            (
+                "Please answer with a named system alias like 'tuto' or an "
+                "SSH target like 'root@10.0.0.10'."
+            ),
+        )
+        if answer is None:
+            return "Run cancelled."
+        return self._resolve_target_clarification(
+            answer=answer,
+            natural_language=natural_language,
+        )
+
+    async def _resolve_run_request(
+        self,
+        *,
+        parsed: dict[str, Any],
+        client: ClientConnection,
+    ) -> dict[str, Any] | str:
+        """Resolve any run target-selection mode into concrete parsed fields."""
+        if parsed.get("target_host") and parsed.get("target_user"):
+            return parsed
+        if parsed.get("system_name"):
+            return self._resolve_named_system(parsed)
+
+        original_natural_language = str(parsed.get("natural_language", "")).strip()
+        if not original_natural_language:
+            return "Run requests require natural-language text."
+
+        if parsed.get("infer_target") is True:
+            inferred = self._infer_named_system_from_request(parsed)
+            if not isinstance(inferred, str):
+                return inferred
+
+        if parsed.get("interpret_request") is True or parsed.get("infer_target") is True:
+            followup_natural_language = original_natural_language
+            interpreted = await self._interpret_run_request_with_llm(
+                natural_language=original_natural_language,
+            )
+            if interpreted is not None:
+                candidate = dict(parsed)
+                candidate.pop("infer_target", None)
+                candidate.pop("interpret_request", None)
+                followup_question = interpreted.pop("followup_question", None)
+                candidate.update(interpreted)
+                candidate_natural_language = str(
+                    candidate.get("natural_language", original_natural_language)
+                ).strip() or original_natural_language
+                if (
+                    candidate_natural_language != original_natural_language
+                    and "original_natural_language" not in candidate
+                ):
+                    candidate["original_natural_language"] = original_natural_language
+                followup_natural_language = candidate_natural_language
+                if candidate.get("system_name"):
+                    resolved = self._resolve_named_system(candidate)
+                    if not isinstance(resolved, str):
+                        return resolved
+                elif candidate.get("target_host") and candidate.get("target_user"):
+                    return candidate
+                if isinstance(followup_question, str) and followup_question.strip():
+                    return await self._ask_for_run_target(
+                        client=client,
+                        natural_language=followup_natural_language,
+                        question=followup_question.strip(),
+                    )
+
+            return await self._ask_for_run_target(
+                client=client,
+                natural_language=followup_natural_language,
+            )
+
+        return parsed
 
     def _infer_named_system_from_request(
         self,
@@ -1699,10 +1958,7 @@ class RequestHandler:
         Returns:
             RESPONSE envelope with started/completed/denied status.
         """
-        if parsed.get("infer_target") is True:
-            resolved = self._infer_named_system_from_request(parsed)
-        else:
-            resolved = self._resolve_named_system(parsed)
+        resolved = await self._resolve_run_request(parsed=parsed, client=client)
         if isinstance(resolved, str):
             return _build_error_response(
                 msg_id=msg_id,

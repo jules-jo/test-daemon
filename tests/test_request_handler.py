@@ -1567,23 +1567,240 @@ class TestRequestHandlerRunVerb:
         assert "Unknown system 'missing-box'" in response.payload["error"]
 
     @pytest.mark.asyncio
-    async def test_run_with_infer_target_and_unknown_system_returns_error(
+    async def test_run_with_infer_target_and_unknown_system_asks_for_target(
         self, tmp_path: Path
     ) -> None:
+        systems_dir = tmp_path / "pages" / "systems"
+        systems_dir.mkdir(parents=True, exist_ok=True)
+        (systems_dir / "tuto.md").write_text(
+            "---\n"
+            "type: system-info\n"
+            "system_name: tuto\n"
+            "host: 10.0.0.10\n"
+            "user: root\n"
+            "---\n\n"
+            "# Tuto\n",
+            encoding="utf-8",
+        )
+
         config = RequestHandlerConfig(wiki_root=tmp_path)
         handler = RequestHandler(config=config)
         client = _make_client()
+        ask_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="ask-target-001",
+            timestamp="2026-04-09T12:00:01Z",
+            payload={"approved": True, "answer": "tuto"},
+        )
+        ask_frame = encode_frame(ask_reply)
+        client.reader.readexactly = AsyncMock(
+            side_effect=[ask_frame[:4], ask_frame[4:]]
+        )
+        expected = MessageEnvelope(
+            msg_type=MessageType.RESPONSE,
+            msg_id="req-001",
+            timestamp="2026-04-09T12:00:02Z",
+            payload={"status": "started"},
+        )
+        handler._handle_run_oneshot = AsyncMock(return_value=expected)  # type: ignore[method-assign]
 
         envelope = _make_request(payload={
             "verb": "run",
             "infer_target": True,
-            "natural_language": "run smoke tests in tuto",
+            "natural_language": "run smoke tests in qa-box",
         })
 
         response = await handler.handle_message(envelope, client)
 
-        assert response.msg_type == MessageType.ERROR
-        assert "Could not infer a named system" in response.payload["error"]
+        assert response == expected
+        prompt_bytes = b"".join(call.args[0] for call in client.writer.write.call_args_list)
+        prompt_length = unpack_header(prompt_bytes[:HEADER_SIZE])
+        prompt = decode_envelope(prompt_bytes[HEADER_SIZE:HEADER_SIZE + prompt_length])
+        assert prompt.msg_type == MessageType.CONFIRM_PROMPT
+        assert prompt.payload["type"] == "question"
+        run_args = handler._handle_run_oneshot.await_args.args[1]
+        assert run_args["target_host"] == "10.0.0.10"
+        assert run_args["target_user"] == "root"
+        assert run_args["resolved_system_name"] == "tuto"
+
+    @pytest.mark.asyncio
+    async def test_run_with_interpret_request_asks_for_target_when_llm_is_unavailable(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        systems_dir = tmp_path / "pages" / "systems"
+        systems_dir.mkdir(parents=True, exist_ok=True)
+        (systems_dir / "tuto.md").write_text(
+            "---\n"
+            "type: system-info\n"
+            "system_name: tuto\n"
+            "host: 10.0.0.10\n"
+            "user: root\n"
+            "---\n\n"
+            "# Tuto\n",
+            encoding="utf-8",
+        )
+
+        handler = RequestHandler(config=RequestHandlerConfig(wiki_root=tmp_path))
+        client = _make_client()
+        ask_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="ask-target-002",
+            timestamp="2026-04-09T12:00:01Z",
+            payload={"approved": True, "answer": "tuto"},
+        )
+        ask_frame = encode_frame(ask_reply)
+        client.reader.readexactly = AsyncMock(
+            side_effect=[ask_frame[:4], ask_frame[4:]]
+        )
+        expected = MessageEnvelope(
+            msg_type=MessageType.RESPONSE,
+            msg_id="req-001",
+            timestamp="2026-04-09T12:00:02Z",
+            payload={"status": "started"},
+        )
+        handler._handle_run_oneshot = AsyncMock(return_value=expected)  # type: ignore[method-assign]
+
+        envelope = _make_request(payload={
+            "verb": "run",
+            "interpret_request": True,
+            "natural_language": "run smoke tests",
+        })
+
+        response = await handler.handle_message(envelope, client)
+
+        assert response == expected
+        prompt_bytes = b"".join(call.args[0] for call in client.writer.write.call_args_list)
+        prompt_length = unpack_header(prompt_bytes[:HEADER_SIZE])
+        prompt = decode_envelope(prompt_bytes[HEADER_SIZE:HEADER_SIZE + prompt_length])
+        assert prompt.msg_type == MessageType.CONFIRM_PROMPT
+        assert prompt.payload["type"] == "question"
+        assert "Which named system or SSH target" in prompt.payload["question"]
+        run_args = handler._handle_run_oneshot.await_args.args[1]
+        assert run_args["target_host"] == "10.0.0.10"
+        assert run_args["target_user"] == "root"
+        assert run_args["natural_language"] == "run smoke tests"
+
+    @pytest.mark.asyncio
+    async def test_run_with_interpret_request_uses_llm_resolution_and_cleaned_request(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        systems_dir = tmp_path / "pages" / "systems"
+        systems_dir.mkdir(parents=True, exist_ok=True)
+        (systems_dir / "tutorial-box.md").write_text(
+            "---\n"
+            "type: system-info\n"
+            "system_name: tutorial-box\n"
+            "aliases:\n"
+            "  - tuto\n"
+            "host: 10.0.0.10\n"
+            "user: root\n"
+            "---\n\n"
+            "# Tutorial Box\n",
+            encoding="utf-8",
+        )
+
+        handler = RequestHandler(config=RequestHandlerConfig(wiki_root=tmp_path))
+        client = _make_client()
+        expected = MessageEnvelope(
+            msg_type=MessageType.RESPONSE,
+            msg_id="req-001",
+            timestamp="2026-04-09T12:00:02Z",
+            payload={"status": "started"},
+        )
+        handler._handle_run_oneshot = AsyncMock(return_value=expected)  # type: ignore[method-assign]
+
+        with patch.object(
+            handler,
+            "_interpret_run_request_with_llm",
+            AsyncMock(return_value={
+                "system_name": "tuto",
+                "natural_language": "run smoke tests. 1 iteration",
+            }),
+        ):
+            envelope = _make_request(payload={
+                "verb": "run",
+                "interpret_request": True,
+                "natural_language": "run smoke tests in tuto. 1 iteration",
+            })
+
+            response = await handler.handle_message(envelope, client)
+
+        assert response == expected
+        run_args = handler._handle_run_oneshot.await_args.args[1]
+        assert run_args["target_host"] == "10.0.0.10"
+        assert run_args["target_user"] == "root"
+        assert run_args["resolved_system_name"] == "tutorial-box"
+        assert run_args["natural_language"] == "run smoke tests. 1 iteration"
+        assert (
+            run_args["original_natural_language"]
+            == "run smoke tests in tuto. 1 iteration"
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_with_interpret_request_uses_llm_followup_question(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        systems_dir = tmp_path / "pages" / "systems"
+        systems_dir.mkdir(parents=True, exist_ok=True)
+        (systems_dir / "tuto.md").write_text(
+            "---\n"
+            "type: system-info\n"
+            "system_name: tuto\n"
+            "host: 10.0.0.10\n"
+            "user: root\n"
+            "---\n\n"
+            "# Tuto\n",
+            encoding="utf-8",
+        )
+
+        handler = RequestHandler(config=RequestHandlerConfig(wiki_root=tmp_path))
+        client = _make_client()
+        ask_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="ask-target-003",
+            timestamp="2026-04-09T12:00:01Z",
+            payload={"approved": True, "answer": "tuto"},
+        )
+        ask_frame = encode_frame(ask_reply)
+        client.reader.readexactly = AsyncMock(
+            side_effect=[ask_frame[:4], ask_frame[4:]]
+        )
+        expected = MessageEnvelope(
+            msg_type=MessageType.RESPONSE,
+            msg_id="req-001",
+            timestamp="2026-04-09T12:00:02Z",
+            payload={"status": "started"},
+        )
+        handler._handle_run_oneshot = AsyncMock(return_value=expected)  # type: ignore[method-assign]
+
+        with patch.object(
+            handler,
+            "_interpret_run_request_with_llm",
+            AsyncMock(return_value={
+                "natural_language": "run smoke tests. 1 iteration",
+                "followup_question": "Which named system should I use for this run?",
+            }),
+        ):
+            envelope = _make_request(payload={
+                "verb": "run",
+                "interpret_request": True,
+                "natural_language": "run smoke tests there. 1 iteration",
+            })
+
+            response = await handler.handle_message(envelope, client)
+
+        assert response == expected
+        prompt_bytes = b"".join(call.args[0] for call in client.writer.write.call_args_list)
+        prompt_length = unpack_header(prompt_bytes[:HEADER_SIZE])
+        prompt = decode_envelope(prompt_bytes[HEADER_SIZE:HEADER_SIZE + prompt_length])
+        assert prompt.payload["question"] == "Which named system should I use for this run?"
+        run_args = handler._handle_run_oneshot.await_args.args[1]
+        assert run_args["target_host"] == "10.0.0.10"
+        assert run_args["target_user"] == "root"
+        assert run_args["natural_language"] == "run smoke tests. 1 iteration"
 
 
 # ---------------------------------------------------------------------------

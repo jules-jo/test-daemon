@@ -321,6 +321,7 @@ class ThinClient:
         key_path: str | None = None,
         system_name: str | None = None,
         infer_target: bool = False,
+        interpret_request: bool = False,
     ) -> CommandResult:
         """Submit a new test execution.
 
@@ -337,6 +338,9 @@ class ThinClient:
             system_name: Named system alias defined in the wiki.
             infer_target: Ask the daemon to infer a named system from
                 the natural-language request using its live wiki.
+            interpret_request: Ask the daemon to use its LLM-assisted
+                interpretation fallback for unresolved conversational
+                run requests.
 
         Returns:
             CommandResult with the daemon's run response (which may
@@ -350,15 +354,20 @@ class ThinClient:
                     or target_port != 22
                     or key_path is not None
                     or infer_target
+                    or interpret_request
                 ):
                     raise ValueError(
-                        "system_name cannot be combined with explicit target fields or infer_target"
+                        "system_name cannot be combined with explicit target fields, infer_target, or interpret_request"
                     )
                 envelope = build_run_request(
                     natural_language=natural_language,
                     system_name=system_name,
                 )
             elif infer_target:
+                if interpret_request:
+                    raise ValueError(
+                        "infer_target cannot be combined with interpret_request"
+                    )
                 if (
                     target_host is not None
                     or target_user is not None
@@ -371,6 +380,20 @@ class ThinClient:
                 envelope = build_run_request(
                     natural_language=natural_language,
                     infer_target=True,
+                )
+            elif interpret_request:
+                if (
+                    target_host is not None
+                    or target_user is not None
+                    or target_port != 22
+                    or key_path is not None
+                ):
+                    raise ValueError(
+                        "interpret_request cannot be combined with explicit target fields"
+                    )
+                envelope = build_run_request(
+                    natural_language=natural_language,
+                    interpret_request=True,
                 )
             else:
                 target = SSHTargetParams(

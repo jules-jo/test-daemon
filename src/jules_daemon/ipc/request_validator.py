@@ -400,6 +400,7 @@ def _validate_run_fields(
 
     system_name = _validate_optional_non_empty_string(payload, "system_name", errors)
     infer_target = payload.get("infer_target") is True
+    interpret_request = payload.get("interpret_request") is True
     if system_name is not None:
         parsed["system_name"] = system_name
 
@@ -411,6 +412,7 @@ def _validate_run_fields(
                 "target_port",
                 "key_path",
                 "infer_target",
+                "interpret_request",
             )
             if payload.get(field_name) is not None
         ]
@@ -429,7 +431,13 @@ def _validate_run_fields(
         parsed["infer_target"] = True
         conflicting_fields = [
             field_name
-            for field_name in ("target_host", "target_user", "target_port", "key_path")
+            for field_name in (
+                "target_host",
+                "target_user",
+                "target_port",
+                "key_path",
+                "interpret_request",
+            )
             if payload.get(field_name) is not None
         ]
         if conflicting_fields:
@@ -437,6 +445,30 @@ def _validate_run_fields(
                 field="infer_target",
                 message=(
                     "'infer_target' cannot be combined with explicit target "
+                    f"fields: {', '.join(conflicting_fields)}"
+                ),
+                code="conflicting_fields",
+            ))
+        return parsed
+
+    if interpret_request:
+        parsed["interpret_request"] = True
+        conflicting_fields = [
+            field_name
+            for field_name in (
+                "target_host",
+                "target_user",
+                "target_port",
+                "key_path",
+                "infer_target",
+            )
+            if payload.get(field_name) is not None
+        ]
+        if conflicting_fields:
+            errors.append(ValidationError(
+                field="interpret_request",
+                message=(
+                    "'interpret_request' cannot be combined with explicit target "
                     f"fields: {', '.join(conflicting_fields)}"
                 ),
                 code="conflicting_fields",

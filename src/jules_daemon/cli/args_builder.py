@@ -245,6 +245,19 @@ def _build_run_args(extracted: dict[str, Any]) -> RunArgs | str:
         except ValueError as exc:
             return str(exc)
 
+    interpret_request = extracted.get("interpret_request") is True
+    if interpret_request:
+        natural_language = _coerce_optional_str(extracted.get("natural_language"))
+        if natural_language is None:
+            return "Missing required field: natural_language"
+        try:
+            return RunArgs(
+                natural_language=natural_language,
+                interpret_request=True,
+            )
+        except ValueError as exc:
+            return str(exc)
+
     fields = _extract_ssh_nl_fields(extracted)
     if isinstance(fields, str):
         return fields

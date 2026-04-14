@@ -287,6 +287,13 @@ class TestRunArgs:
         )
         assert args.infer_target is True
 
+    def test_run_args_can_request_interpret_request(self) -> None:
+        args = RunArgs(
+            natural_language="run tests",
+            interpret_request=True,
+        )
+        assert args.interpret_request is True
+
     def test_system_name_conflicts_with_explicit_target(self) -> None:
         with pytest.raises(ValueError, match="system_name cannot be combined"):
             RunArgs(
@@ -310,6 +317,14 @@ class TestRunArgs:
             infer_target=True,
         )
         with pytest.raises(ValueError, match="infer_target is resolved"):
+            args.to_ssh_target()
+
+    def test_to_ssh_target_rejects_interpret_request(self) -> None:
+        args = RunArgs(
+            natural_language="run tests",
+            interpret_request=True,
+        )
+        with pytest.raises(ValueError, match="interpret_request is resolved"):
             args.to_ssh_target()
 
 

@@ -246,6 +246,21 @@ class TestSSHTargetExtraction:
         assert result.extracted_args.get("natural_language") == raw
         assert "system_name" not in result.extracted_args
 
+    def test_plain_run_request_sets_interpret_request_hint(self) -> None:
+        raw = "run the smoke tests"
+        result = extract_from_natural_language(raw)
+        assert result.extracted_args.get("interpret_request") is True
+        assert result.extracted_args.get("natural_language") == raw
+        assert "infer_target" not in result.extracted_args
+        assert "system_name" not in result.extracted_args
+
+    def test_ssh_target_phrase_does_not_set_infer_target_hint(self) -> None:
+        raw = "can you run the smoke tests on ci@staging?"
+        result = extract_from_natural_language(raw)
+        assert result.extracted_args.get("target_user") == "ci"
+        assert result.extracted_args.get("target_host") == "staging"
+        assert "infer_target" not in result.extracted_args
+
 
 class TestNLExtractionDataclass:
     """Tests for the NLExtraction dataclass itself."""

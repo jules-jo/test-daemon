@@ -303,10 +303,20 @@ class TestBuildRunRequest:
         assert "target_host" not in envelope.payload
         assert "system_name" not in envelope.payload
 
+    def test_run_request_with_interpret_request(self):
+        envelope = build_run_request(
+            natural_language="run the unit tests",
+            interpret_request=True,
+        )
+        _assert_valid_envelope(envelope, "run")
+        assert envelope.payload["interpret_request"] is True
+        assert "target_host" not in envelope.payload
+        assert "system_name" not in envelope.payload
+
     def test_run_request_rejects_missing_target_selection(self):
         with pytest.raises(
             ValueError,
-            match="exactly one of target, system_name, or infer_target",
+            match="exactly one of target, system_name, infer_target, or interpret_request",
         ):
             build_run_request(natural_language="run the unit tests")
 

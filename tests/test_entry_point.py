@@ -57,7 +57,13 @@ async def fake_watch_handler(args: VerbArgs) -> dict[str, Any]:
 
 async def fake_run_handler(args: VerbArgs) -> dict[str, Any]:
     run_args: RunArgs = args  # type: ignore[assignment]
-    return {"started": True, "host": run_args.target_host}
+    return {
+        "started": True,
+        "host": run_args.target_host,
+        "system_name": run_args.system_name,
+        "infer_target": run_args.infer_target,
+        "interpret_request": run_args.interpret_request,
+    }
 
 
 async def fake_queue_handler(args: VerbArgs) -> dict[str, Any]:
@@ -420,6 +426,24 @@ class TestNaturalLanguageDispatch:
         assert result.classification is not None
         assert result.classification.input_type == InputType.NATURAL_LANGUAGE
 
+    @pytest.mark.asyncio
+    async def test_plain_run_request_without_target_uses_interpret_request(
+        self,
+        full_registry: CommandHandlerRegistry,
+        full_dispatcher: CommandDispatcher,
+    ) -> None:
+        result = await process_input(
+            "run the smoke tests",
+            registry=full_registry,
+            dispatcher=full_dispatcher,
+        )
+        assert result.success is True
+        assert result.dispatch_response is not None
+        assert result.dispatch_response.verb == Verb.RUN
+        assert result.dispatch_response.payload["interpret_request"] is True
+        assert result.classification is not None
+        assert result.classification.input_type == InputType.NATURAL_LANGUAGE
+
 
 # ---------------------------------------------------------------------------
 # Error handling
@@ -463,15 +487,15 @@ class TestErrorHandling:
         full_registry: CommandHandlerRegistry,
         full_dispatcher: CommandDispatcher,
     ) -> None:
-        """Structured parse error (missing required target for run)."""
+        """Bare ``run`` now falls into conversational interpretation mode."""
         result = await process_input(
             "run",
             registry=full_registry,
             dispatcher=full_dispatcher,
         )
-        # Should fail because run requires user@host + NL
-        assert result.success is False
-        assert result.error is not None
+        assert result.success is True
+        assert result.dispatch_response is not None
+        assert result.dispatch_response.payload["interpret_request"] is True
 
     @pytest.mark.asyncio
     async def test_unregistered_handler(

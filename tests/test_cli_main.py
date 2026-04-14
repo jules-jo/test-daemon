@@ -57,22 +57,21 @@ class TestResolveInput:
         assert result.hint == "(interpreted as 'run')"
         assert result.error is None
 
-    def test_run_sentence_without_target_returns_helpful_error(self) -> None:
-        result = _resolve_input(
-            "run the smoke tests",
-            allow_prompt=False,
-        )
-        assert result.parts is None
-        assert result.error is not None
-        assert "system" in result.error
-
-    def test_run_sentence_without_target_prompts_interactively(self) -> None:
+    def test_run_sentence_without_target_uses_interpret_request(self) -> None:
         raw = "run the smoke tests"
-        with patch("builtins.input", return_value="deploy@staging:2222"):
-            result = _resolve_input(raw, allow_prompt=True)
-        assert result.parts == ("run", "deploy@staging:2222", raw)
+        result = _resolve_input(raw, allow_prompt=False)
+        assert result.parts == ("run", "--interpret-request", raw)
         assert result.hint == "(interpreted as 'run')"
         assert result.error is None
+
+    def test_run_sentence_without_target_does_not_prompt_locally(self) -> None:
+        raw = "run the smoke tests"
+        with patch("builtins.input") as mock_input:
+            result = _resolve_input(raw, allow_prompt=True)
+        assert result.parts == ("run", "--interpret-request", raw)
+        assert result.hint == "(interpreted as 'run')"
+        assert result.error is None
+        mock_input.assert_not_called()
 
     def test_run_sentence_with_system_alias_is_rewritten(self) -> None:
         raw = "run the smoke tests in system tuto"

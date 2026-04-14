@@ -432,12 +432,13 @@ def _parse_run_args(tokens: list[str]) -> RunArgs | str:
       run user@host[:port] <natural language> [--port N] [--key PATH]
       run --system NAME <natural language>
       run --infer-target <natural language>
+      run --interpret-request <natural language>
     """
     positionals, flags = _split_flags_and_positionals(tokens)
 
     err = _check_unknown_flags(
         flags,
-        frozenset({"--port", "--key", "--system", "--infer-target"}),
+        frozenset({"--port", "--key", "--system", "--infer-target", "--interpret-request"}),
         "run",
     )
     if err is not None:
@@ -448,6 +449,7 @@ def _parse_run_args(tokens: list[str]) -> RunArgs | str:
     except ValueError as exc:
         return str(exc)
     infer_target = "--infer-target" in flags
+    interpret_request = "--interpret-request" in flags
 
     # ``_split_flags_and_positionals()`` is intentionally generic and treats a
     # non-flag token after any flag as that flag's value. ``--infer-target`` is
@@ -458,10 +460,14 @@ def _parse_run_args(tokens: list[str]) -> RunArgs | str:
     if infer_target and infer_target_captured is not None:
         positionals = [infer_target_captured, *positionals]
         flags["--infer-target"] = None
+    interpret_captured = flags.get("--interpret-request")
+    if interpret_request and interpret_captured is not None:
+        positionals = [interpret_captured, *positionals]
+        flags["--interpret-request"] = None
 
     if system_name is not None:
-        if infer_target:
-            return "--system cannot be combined with --infer-target"
+        if infer_target or interpret_request:
+            return "--system cannot be combined with --infer-target or --interpret-request"
         if "--port" in flags or "--key" in flags:
             return "--system cannot be combined with --port or --key"
         if not positionals:
@@ -478,6 +484,8 @@ def _parse_run_args(tokens: list[str]) -> RunArgs | str:
             return str(exc)
 
     if infer_target:
+        if interpret_request:
+            return "--infer-target cannot be combined with --interpret-request"
         if "--port" in flags or "--key" in flags:
             return "--infer-target cannot be combined with --port or --key"
         if not positionals:
@@ -489,6 +497,22 @@ def _parse_run_args(tokens: list[str]) -> RunArgs | str:
             return RunArgs(
                 natural_language=natural_language,
                 infer_target=True,
+            )
+        except ValueError as exc:
+            return str(exc)
+
+    if interpret_request:
+        if "--port" in flags or "--key" in flags:
+            return "--interpret-request cannot be combined with --port or --key"
+        if not positionals:
+            return "run requires a natural-language command after --interpret-request"
+        if "@" in positionals[0]:
+            return "run cannot combine a user@host target with --interpret-request"
+        natural_language = " ".join(positionals)
+        try:
+            return RunArgs(
+                natural_language=natural_language,
+                interpret_request=True,
             )
         except ValueError as exc:
             return str(exc)

@@ -267,10 +267,30 @@ def _extract_infer_target_hint(raw: str) -> dict[str, Any]:
     """
     if _SYSTEM_NAME_RE.search(raw):
         return {}
+    if _SSH_TARGET_RE.search(raw):
+        return {}
     match = _IMPLICIT_SYSTEM_NAME_RE.search(raw)
     if match is None:
         return {}
     return {"infer_target": True}
+
+
+def _extract_interpret_request_hint(
+    *,
+    canonical_verb: str,
+    extracted_args: dict[str, Any],
+) -> dict[str, Any]:
+    """Mark conversational run requests that still need daemon interpretation."""
+    if canonical_verb != "run":
+        return {}
+    if (
+        "target_host" in extracted_args
+        or "target_user" in extracted_args
+        or "system_name" in extracted_args
+        or extracted_args.get("infer_target") is True
+    ):
+        return {}
+    return {"interpret_request": True}
 
 
 def _select_best_verb(
@@ -357,6 +377,12 @@ def extract_from_natural_language(raw: str) -> NLExtraction:
     extracted_args: dict[str, Any] = dict(ssh_args)
     extracted_args.update(system_args)
     extracted_args.update(infer_args)
+    extracted_args.update(
+        _extract_interpret_request_hint(
+            canonical_verb=best_verb,
+            extracted_args=extracted_args,
+        )
+    )
     if best_verb in {"run", "queue"}:
         extracted_args["natural_language"] = stripped
 

@@ -216,6 +216,9 @@ class RunArgs:
             ``wiki/pages/systems`` and explicit target fields must be empty.
         infer_target: When True, the daemon attempts to infer a named
             system from the natural-language request using its live wiki.
+        interpret_request: When True, the daemon uses an LLM-assisted
+            interpretation path to resolve the run target and cleaned
+            task text from a conversational request before execution.
         target_port: SSH port on the remote host. Default is 22.
         key_path: Absolute path to the SSH private key file.
             None means use the SSH agent or default key.
@@ -226,6 +229,7 @@ class RunArgs:
     natural_language: str = ""
     system_name: Optional[str] = None
     infer_target: bool = False
+    interpret_request: bool = False
     target_port: int = 22
     key_path: Optional[str] = None
 
@@ -233,6 +237,10 @@ class RunArgs:
         if not self.natural_language.strip():
             raise ValueError("natural_language must not be empty")
         has_system_name = self.system_name is not None and self.system_name.strip() != ""
+        if self.interpret_request and has_system_name:
+            raise ValueError("interpret_request cannot be combined with system_name")
+        if self.interpret_request and self.infer_target:
+            raise ValueError("interpret_request cannot be combined with infer_target")
         if has_system_name and self.infer_target:
             raise ValueError("infer_target cannot be combined with system_name")
         if has_system_name:
@@ -253,6 +261,15 @@ class RunArgs:
                 raise ValueError("infer_target cannot be combined with target_port")
             if self.key_path is not None:
                 raise ValueError("infer_target cannot be combined with key_path")
+        elif self.interpret_request:
+            if self.target_host.strip() or self.target_user.strip():
+                raise ValueError(
+                    "interpret_request cannot be combined with target_host or target_user"
+                )
+            if self.target_port != 22:
+                raise ValueError("interpret_request cannot be combined with target_port")
+            if self.key_path is not None:
+                raise ValueError("interpret_request cannot be combined with key_path")
         else:
             if not self.target_host.strip():
                 raise ValueError("target_host must not be empty")
@@ -277,6 +294,8 @@ class RunArgs:
             raise ValueError("Cannot build SSHTarget until system_name is resolved")
         if self.infer_target:
             raise ValueError("Cannot build SSHTarget until infer_target is resolved")
+        if self.interpret_request:
+            raise ValueError("Cannot build SSHTarget until interpret_request is resolved")
         return SSHTarget(
             host=self.target_host,
             user=self.target_user,
