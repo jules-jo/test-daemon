@@ -339,7 +339,7 @@ class TestBuildWikiContext:
         context = handler._build_wiki_context(target_host="staging.example.com")
         assert context == []
 
-    def test_ignores_past_translations(self, tmp_path: Path) -> None:
+    def test_includes_past_translations(self, tmp_path: Path) -> None:
         from jules_daemon.wiki.command_translation import (
             CommandTranslation,
             TranslationOutcome,
@@ -361,11 +361,12 @@ class TestBuildWikiContext:
         handler = RequestHandler(config=config)
 
         context = handler._build_wiki_context(target_host="staging.example.com")
-        assert context == []
+        assert len(context) >= 1
+        joined = "\n".join(context)
+        assert "run the smoke tests" in joined
+        assert "pytest tests/smoke/ -v" in joined
 
-    def test_returns_empty_even_when_translations_exist_for_other_hosts(
-        self, tmp_path: Path,
-    ) -> None:
+    def test_filters_by_host(self, tmp_path: Path) -> None:
         from jules_daemon.wiki.command_translation import (
             CommandTranslation,
             TranslationOutcome,
@@ -400,7 +401,10 @@ class TestBuildWikiContext:
         handler = RequestHandler(config=config)
 
         context = handler._build_wiki_context(target_host="staging.example.com")
-        assert context == []
+        assert len(context) >= 1
+        joined = "\n".join(context)
+        assert "run smoke" in joined
+        assert "run tests" not in joined  # other host's translation is filtered out
 
 
 # ---------------------------------------------------------------------------
