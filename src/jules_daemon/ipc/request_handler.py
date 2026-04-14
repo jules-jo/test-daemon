@@ -1405,8 +1405,8 @@ class RequestHandler:
         is returned as-is with a warning log. This guarantees the daemon
         never crashes due to an LLM issue.
 
-        Wiki translation history for the target host is included as extra
-        context so the LLM can make better guesses based on past commands.
+        Additional wiki prompt context may be included when available.
+        Translation history is intentionally excluded from that context.
 
         Args:
             natural_language: The user's free-text request.
@@ -1425,7 +1425,7 @@ class RequestHandler:
             )
             return natural_language
 
-        # Build host context with wiki history for better translation
+        # Build host context with any allowed wiki prompt context.
         extra_context = self._build_wiki_context(
             target_host=target_host,
         )
@@ -1496,88 +1496,20 @@ class RequestHandler:
         *,
         target_host: str,
     ) -> list[str]:
-        """Gather wiki translation history for the target host.
+        """Return extra wiki context for prompt construction.
 
-        Returns a list of context strings suitable for inclusion in the
-        LLM prompt's ``extra_context`` field. Reads from the wiki
-        translation store; returns an empty list if the wiki is empty
-        or an error occurs.
-
-        Filters and ordering:
-          - DENIED entries are skipped (the user rejected those, so they
-            shouldn't influence future proposals).
-          - EDITED entries are listed FIRST -- they represent the user's
-            corrections of LLM proposals and should be treated as ground
-            truth. The prompt explicitly tells the LLM to mirror their
-            format.
-          - Within each group, entries are sorted by created_at descending
-            (newest first) so the LLM weights the most recent corrections.
-          - Up to 8 entries total (5 edited + 3 approved as headroom).
+        Translation history pages are intentionally excluded from the
+        active one-shot and agent paths. The pages still exist for audit
+        and future reference, but they are not surfaced to the LLM.
 
         Args:
-            target_host: The SSH host to look up history for.
+            target_host: Preserved for API compatibility.
 
         Returns:
-            List of human-readable context strings.
+            Empty list.
         """
-        context_lines: list[str] = []
-        try:
-            from jules_daemon.wiki.command_translation import (
-                TranslationOutcome,
-                list_all,
-            )
-
-            all_translations = list_all(self._config.wiki_root)
-            host_translations = [
-                t for t in all_translations
-                if t.ssh_host == target_host
-            ]
-
-            # Sort newest first
-            host_translations.sort(
-                key=lambda t: t.created_at,
-                reverse=True,
-            )
-
-            # Partition by outcome (skip DENIED)
-            edited = [
-                t for t in host_translations
-                if t.outcome == TranslationOutcome.EDITED
-            ][:5]
-            approved = [
-                t for t in host_translations
-                if t.outcome == TranslationOutcome.APPROVED
-            ][:3]
-
-            if edited:
-                context_lines.append(
-                    "### USER-CORRECTED COMMANDS (treat as ground truth)"
-                )
-                context_lines.append(
-                    "These are corrections the user made to previous LLM proposals. "
-                    "Mirror this exact format -- including quoting, flags, and "
-                    "argument style -- when generating new commands."
-                )
-                for t in edited:
-                    context_lines.append(
-                        f"- '{t.natural_language}' -> `{t.resolved_shell}`"
-                    )
-
-            if approved:
-                context_lines.append("")
-                context_lines.append("### Previously approved commands (for reference)")
-                for t in approved:
-                    context_lines.append(
-                        f"- '{t.natural_language}' -> `{t.resolved_shell}`"
-                    )
-        except Exception as exc:
-            logger.debug(
-                "Failed to read wiki translation history for %s: %s",
-                target_host,
-                exc,
-            )
-
-        return context_lines
+        _ = target_host
+        return []
 
     def _resolve_named_system(
         self,
@@ -2798,7 +2730,6 @@ class RequestHandler:
         Includes:
         - Role definition and behavioral constraints
         - SSH target context (host, user, port)
-        - Wiki translation history (if available)
         - Test catalog awareness
         - Security constraints (approval requirements)
 
@@ -2853,9 +2784,11 @@ class RequestHandler:
             "## Additional Rules",
             "- Use check_remote_processes before proposing if you suspect "
             "other tests may be running.",
-            "- Use read_wiki for past command history on this host.",
+            "- Use read_wiki for accumulated test knowledge when "
+            "lookup_test_spec is missing or incomplete.",
             "- If no test spec exists in the wiki, try to construct the "
-            "command from the user's description and wiki history.",
+            "command from the user's description and any relevant test "
+            "knowledge in the wiki.",
             "- The SSH target has already been resolved by the daemon. "
             "If the user originally wrote a target alias phrase like "
             "'in tuto' or 'in system tuto', treat that as transport "

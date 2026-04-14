@@ -1,8 +1,8 @@
-"""read_wiki tool -- wraps wiki.command_translation + wiki.test_knowledge.
+"""read_wiki tool -- wraps wiki.test_knowledge.
 
-Searches the wiki for past NL-to-command translations and accumulated
-test knowledge. The LLM uses this to learn from past runs and understand
-known test patterns before proposing new commands.
+Searches the wiki for accumulated test knowledge only. Translation-history
+pages are intentionally excluded from the active agent path so past NL-to-
+command mappings do not bias current command generation.
 
 Extends InfoRetrievalTool (the base class for read-only tools) which
 provides:
@@ -12,7 +12,6 @@ provides:
     - ToolSpec conversion (to_tool_spec) for ToolRegistry integration
 
 Delegates to:
-    - jules_daemon.wiki.command_translation.find_by_query
     - jules_daemon.wiki.test_knowledge.load_test_knowledge
     - jules_daemon.wiki.test_knowledge.derive_test_slug
 
@@ -47,14 +46,13 @@ __all__ = ["ReadWikiTool"]
 logger = logging.getLogger(__name__)
 
 _MAX_TRANSLATIONS = 5
-"""Maximum number of past translations to return."""
+"""Legacy compatibility field; translation results are always empty."""
 
 
 class ReadWikiTool(InfoRetrievalTool):
-    """Search wiki for past translations and test knowledge.
+    """Search wiki for accumulated test knowledge.
 
     Wraps:
-        - wiki.command_translation.find_by_query (past NL->command mappings)
         - wiki.test_knowledge.load_test_knowledge (accumulated test knowledge)
         - wiki.test_knowledge.derive_test_slug (slug derivation)
 
@@ -78,10 +76,10 @@ class ReadWikiTool(InfoRetrievalTool):
     def description(self) -> str:
         """Human-readable description shown to the LLM."""
         return (
-            "Search the wiki for past command translations and test knowledge. "
-            "Returns matching NL-to-command mappings and any accumulated "
-            "knowledge about known tests (purpose, output format, common "
-            "failures, normal behavior)."
+            "Search the wiki for accumulated test knowledge. Returns any "
+            "known test metadata such as purpose, output format, summary "
+            "fields, common failures, normal behavior, and required "
+            "arguments."
         )
 
     @property
@@ -90,9 +88,9 @@ class ReadWikiTool(InfoRetrievalTool):
 
         Parameters:
             query (string, required): Search string to match against
-                past translations and test knowledge.
-            ssh_host (string, optional): SSH host to filter translations
-                by target host.
+                known test knowledge.
+            ssh_host (string, optional): Legacy no-op field kept for schema
+                compatibility. Translation history is not consulted.
         """
         return {
             "type": "object",
@@ -100,14 +98,14 @@ class ReadWikiTool(InfoRetrievalTool):
                 "query": {
                     "type": "string",
                     "description": (
-                        "Search string to match against past translations "
-                        "and test knowledge"
+                        "Search string to match against known test knowledge"
                     ),
                 },
                 "ssh_host": {
                     "type": "string",
                     "description": (
-                        "Optional SSH host to filter translations by target host"
+                        "Legacy no-op field kept for compatibility; "
+                        "translation history is not used"
                     ),
                 },
             },
@@ -178,7 +176,7 @@ class ReadWikiTool(InfoRetrievalTool):
     async def _execute_impl(
         self, *, call_id: str, args: dict[str, Any]
     ) -> ToolResult:
-        """Search wiki for translations and test knowledge.
+        """Search wiki for accumulated test knowledge.
 
         Runs wiki I/O in a thread pool via asyncio.to_thread to avoid
         blocking the event loop.
@@ -188,8 +186,9 @@ class ReadWikiTool(InfoRetrievalTool):
             args: Validated arguments with at least the 'query' key.
 
         Returns:
-            ToolResult with JSON output containing translations and
-            test knowledge, or an error result if the query is empty.
+            ToolResult with JSON output containing test knowledge and an
+            empty translations list for backward compatibility, or an
+            error result if the query is empty.
         """
         query = args.get("query", "")
         ssh_host = args.get("ssh_host")
@@ -217,37 +216,13 @@ class ReadWikiTool(InfoRetrievalTool):
     ) -> dict[str, Any]:
         """Blocking wiki search -- runs in thread pool.
 
-        Delegates to existing wiki modules:
-        - command_translation.find_by_query for past translations
-        - test_knowledge.load_test_knowledge for accumulated knowledge
+        Delegates to wiki.test_knowledge for accumulated test knowledge.
+        Translation pages are intentionally ignored in the active path.
         """
-        from jules_daemon.wiki.command_translation import find_by_query
         from jules_daemon.wiki.test_knowledge import (
             derive_test_slug,
             load_test_knowledge,
         )
-
-        # Search past translations
-        find_kwargs: dict[str, Any] = {
-            "wiki_root": self._wiki_root,
-            "query": query,
-            "max_results": _MAX_TRANSLATIONS,
-        }
-        if ssh_host:
-            find_kwargs["ssh_host"] = ssh_host
-
-        translations = find_by_query(**find_kwargs)
-
-        translations_data = [
-            {
-                "natural_language": t.natural_language,
-                "resolved_shell": t.resolved_shell,
-                "ssh_host": t.ssh_host,
-                "outcome": t.outcome.value,
-                "model_id": t.model_id,
-            }
-            for t in translations
-        ]
 
         # Look up test knowledge by deriving a slug from the query
         test_slug = derive_test_slug(query)
@@ -266,7 +241,7 @@ class ReadWikiTool(InfoRetrievalTool):
             }
 
         return {
-            "translations": translations_data,
+            "translations": [],
             "test_knowledge": knowledge_data,
             "query": query,
         }

@@ -190,17 +190,16 @@ class TestApprovalClassification:
 
 
 # ---------------------------------------------------------------------------
-# read_wiki wraps command_translation + test_knowledge
+# read_wiki wraps test_knowledge
 # ---------------------------------------------------------------------------
 
 
 class TestReadWikiTool:
-    """Verify read_wiki wraps wiki.command_translation + wiki.test_knowledge."""
+    """Verify read_wiki wraps wiki.test_knowledge only."""
 
     @pytest.mark.asyncio
-    async def test_wraps_find_by_query(self, wiki_root: Path) -> None:
-        """read_wiki must delegate to command_translation.find_by_query."""
-        # Save a translation to find
+    async def test_ignores_translation_history(self, wiki_root: Path) -> None:
+        """read_wiki should not surface stored NL-to-command translations."""
         from jules_daemon.wiki.command_translation import (
             CommandTranslation,
             save,
@@ -219,8 +218,7 @@ class TestReadWikiTool:
         assert result.status == ToolResultStatus.SUCCESS
         data = json.loads(result.output)
         assert "translations" in data
-        assert len(data["translations"]) >= 1
-        assert data["translations"][0]["natural_language"] == "run the smoke tests"
+        assert data["translations"] == []
 
     @pytest.mark.asyncio
     async def test_wraps_load_test_knowledge(self, wiki_root: Path) -> None:
@@ -273,7 +271,7 @@ class TestReadWikiTool:
 
     @pytest.mark.asyncio
     async def test_ssh_host_filter(self, wiki_root: Path) -> None:
-        """read_wiki can filter translations by SSH host."""
+        """Legacy ssh_host argument does not re-enable translation lookup."""
         from jules_daemon.wiki.command_translation import (
             CommandTranslation,
             save,
@@ -298,8 +296,7 @@ class TestReadWikiTool:
         })
 
         data = json.loads(result.output)
-        for t in data["translations"]:
-            assert t["ssh_host"] == "host-a"
+        assert data["translations"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -1470,10 +1467,10 @@ class TestWrappingVerification:
     """Verify tools delegate to existing daemon modules, not reimplementations."""
 
     @pytest.mark.asyncio
-    async def test_read_wiki_uses_command_translation_module(
+    async def test_read_wiki_does_not_use_command_translation_module(
         self, wiki_root: Path,
     ) -> None:
-        """read_wiki must call command_translation.find_by_query internally."""
+        """read_wiki should ignore translation history in the active path."""
         tool = ReadWikiTool(wiki_root=wiki_root)
 
         with patch(
@@ -1485,7 +1482,7 @@ class TestWrappingVerification:
                 return_value=None,
             ):
                 await tool.execute({"query": "test", "_call_id": "w1"})
-            mock_find.assert_called_once()
+            mock_find.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_parse_test_output_uses_parser_module(self) -> None:
