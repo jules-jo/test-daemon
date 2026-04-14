@@ -467,6 +467,86 @@ class TestAgentLoopResponseHandling:
         assert response.payload["iterations_used"] == 2
 
     @pytest.mark.asyncio
+    async def test_inferred_system_alias_is_removed_before_agent_loop(
+        self, tmp_path: Path,
+    ) -> None:
+        """Resolved system aliases should not be part of the agent task text."""
+        from jules_daemon.agent.agent_loop import (
+            AgentLoopResult,
+            AgentLoopState,
+        )
+
+        systems_dir = tmp_path / "pages" / "systems"
+        systems_dir.mkdir(parents=True, exist_ok=True)
+        (systems_dir / "tutorial-box.md").write_text(
+            "---\n"
+            "type: system-info\n"
+            "system_name: tutorial-box\n"
+            "aliases:\n"
+            "  - tuto\n"
+            "host: 10.0.0.10\n"
+            "user: root\n"
+            "---\n\n"
+            "# Tutorial Box\n",
+            encoding="utf-8",
+        )
+
+        config = RequestHandlerConfig(
+            wiki_root=tmp_path,
+            llm_client=_make_llm_client(),
+            llm_config=_make_llm_config(),
+        )
+        handler = RequestHandler(config=config)
+        client = _make_client()
+
+        mock_result = AgentLoopResult(
+            final_state=AgentLoopState.COMPLETE,
+            iterations_used=1,
+            history=(
+                {"role": "system", "content": "..."},
+                {"role": "user", "content": "run the smoke tests"},
+            ),
+            error_message=None,
+        )
+
+        with patch(
+            "jules_daemon.agent.agent_loop.AgentLoop",
+        ) as MockAgentLoop:
+            mock_loop_instance = AsyncMock()
+            mock_loop_instance.run.return_value = mock_result
+            MockAgentLoop.return_value = mock_loop_instance
+
+            with patch(
+                "jules_daemon.agent.tools.registry_factory.build_tool_set",
+            ) as mock_build:
+                mock_build.return_value = ()
+
+                with patch(
+                    "jules_daemon.agent.llm_adapter.OpenAILLMAdapter",
+                ):
+                    with patch(
+                        "jules_daemon.agent.tool_registry.ToolRegistry",
+                    ) as MockRegistry:
+                        mock_reg = MagicMock()
+                        mock_reg.to_openai_schemas.return_value = ()
+                        mock_reg.list_tool_names.return_value = ()
+                        MockRegistry.return_value = mock_reg
+
+                        envelope = _make_request(payload={
+                            "verb": "run",
+                            "infer_target": True,
+                            "natural_language": "run the smoke tests in tuto",
+                        })
+
+                        response = await handler.handle_message(
+                            envelope, client,
+                        )
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["status"] == "completed"
+        mock_loop_instance.run.assert_awaited_once_with("run the smoke tests")
+
+    @pytest.mark.asyncio
     async def test_agent_loop_complete_returns_started_for_background_run(
         self, tmp_path: Path,
     ) -> None:
@@ -719,6 +799,7 @@ class TestBuildAgentSystemPrompt:
         assert "execute_ssh" in prompt
         assert "approval" in prompt.lower()
         assert "ask_user_question" in prompt
+        assert "resolved system alias" in prompt.lower()
 
     def test_includes_wiki_context_when_available(
         self, tmp_path: Path,

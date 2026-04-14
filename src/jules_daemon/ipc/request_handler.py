@@ -2217,6 +2217,11 @@ class RequestHandler:
             "- Use read_wiki for past command history on this host.",
             "- If no test spec exists in the wiki, try to construct the "
             "command from the user's description and wiki history.",
+            "- The SSH target has already been resolved by the daemon. "
+            "If the user originally wrote a target alias phrase like "
+            "'in tuto' or 'in system tuto', treat that as transport "
+            "metadata that has already been handled. Do NOT ask the user "
+            "what a resolved system alias means.",
             "- NEVER auto-default or guess required arguments. ALWAYS ask.",
         ]
 
