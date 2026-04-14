@@ -36,3 +36,6 @@ Background agent-loop execution now launches daemon-managed runs, live output ca
 
 ## [2026-04-14] implementation | Added wiki-backed named systems for run requests
 Added a user-managed `pages/systems/` wiki directory plus daemon resolution for `system_name` on run requests. The CLI can now interpret prompts like `run the smoke tests in system tuto`, send the named system to the daemon, and let the daemon resolve host/user/port from a markdown page instead of requiring `root@<IP>` in the prompt.
+
+## [2026-04-14] docs | Clarified daemon wiki-dir behavior for named systems
+Documented that system aliases are loaded from the daemon's configured `--wiki-dir`, not automatically from the repo-local `wiki/` folder. Added a copyable `wiki/pages/systems/example-system.md` template file for defining named SSH targets.
