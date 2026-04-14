@@ -48,3 +48,6 @@ Added `wiki/pages/architecture/agent-driven-request-interpretation.md` to captur
 
 ## [2026-04-14] implementation | Switched the active CLI path to daemon-side interpretation
 The legacy CLI front door is still present in code for fallback/reference, but the active `cli_main` flow now forwards nearly all user requests through a daemon-side `interpret` verb. The daemon uses the LLM intent classifier to map conversational prompts to structured verbs, retries once with a follow-up clarification question when confidence or validation is insufficient, and then dispatches into the existing `run` / `status` / `watch` / `cancel` / `history` / `discover` handlers.
+
+## [2026-04-14] implementation | Interactive CLI now subscribes to completion and alert notifications
+The daemon already emitted completion and alert events through the notification broadcaster, but the legacy interactive `jules` REPL was not listening. `cli_main` now starts a background notification subscription for completion and alert events during REPL sessions, so users see test completion/failure notifications without polling `status`.

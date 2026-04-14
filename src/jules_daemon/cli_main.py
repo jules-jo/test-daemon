@@ -21,8 +21,10 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 import difflib
+import logging
 import sys
 from pathlib import Path
 
@@ -71,6 +73,8 @@ _FUZZY_CUTOFF: float = 0.6
 _CLASSIFIER_CONFIDENCE_THRESHOLD: float = 0.7
 _RUN_CLASSIFIER_CONFIDENCE_THRESHOLD: float = 0.5
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class _ResolvedInput:
@@ -79,6 +83,90 @@ class _ResolvedInput:
     parts: tuple[str, ...] | None
     hint: str | None = None
     error: str | None = None
+
+
+def _notification_socket_path(client: ThinClient) -> Path:
+    """Resolve the daemon socket path for the background notification stream."""
+    if client.config.socket_path is not None:
+        return client.config.socket_path
+
+    from jules_daemon.ipc.socket_discovery import default_socket_path
+
+    return default_socket_path()
+
+
+async def _run_notification_listener(socket_path: Path) -> None:
+    """Run a background completion/alert subscription for the REPL session."""
+    from jules_daemon.cli.event_renderer import RenderContext
+    from jules_daemon.cli.stream_consumer import create_default_registry
+    from jules_daemon.cli.styles import StyleConfig
+    from jules_daemon.ipc.subscription_client import (
+        SubscriptionClient,
+        SubscriptionClientConfig,
+        SubscriptionExitReason,
+    )
+    from jules_daemon.protocol.notifications import NotificationEventType
+
+    event_filter = frozenset({
+        NotificationEventType.COMPLETION,
+        NotificationEventType.ALERT,
+    })
+    registry = create_default_registry()
+    context = RenderContext(style=StyleConfig(), verbose=False)
+    subscription = SubscriptionClient(
+        config=SubscriptionClientConfig(
+            socket_path=str(socket_path),
+            event_filter=event_filter,
+            heartbeat_timeout=300.0,
+        ),
+    )
+
+    async def _on_event(envelope: object) -> None:
+        event_type = getattr(getattr(envelope, "event_type", None), "value", None)
+        if not isinstance(event_type, str):
+            return
+        renderer = registry.get(event_type)
+        if renderer is None:
+            return
+        rendered = renderer.render(envelope.payload, context)  # type: ignore[attr-defined]
+        if rendered.text:
+            print()
+            print(rendered.text, flush=True)
+
+    subscription.on_event(_on_event, event_types=event_filter)
+
+    try:
+        result = await subscription.run()
+    except asyncio.CancelledError:
+        await subscription.close()
+        raise
+
+    await subscription.close()
+    if result.exit_reason is not SubscriptionExitReason.CLEAN_CLOSE:
+        logger.debug(
+            "Background notification listener ended: %s (%s)",
+            result.exit_reason.value,
+            result.error_message,
+        )
+
+
+def _start_notification_listener(
+    client: ThinClient,
+) -> asyncio.Task[None]:
+    """Start the background notification listener for an interactive session."""
+    socket_path = _notification_socket_path(client)
+    return asyncio.create_task(_run_notification_listener(socket_path))
+
+
+async def _stop_notification_listener(
+    task: asyncio.Task[None] | None,
+) -> None:
+    """Cancel and await the background notification listener task."""
+    if task is None:
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
 
 # ---------------------------------------------------------------------------
@@ -646,37 +734,42 @@ async def _repl(client: ThinClient) -> int:
     print("Type 'help' for commands, 'c' or Ctrl+C to exit")
     print()
 
-    while True:
-        try:
-            raw = input(_PROMPT).strip()
-        except (EOFError, KeyboardInterrupt):
+    notification_task = _start_notification_listener(client)
+
+    try:
+        while True:
+            try:
+                raw = input(_PROMPT).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+
+            if not raw:
+                continue
+
+            if raw.lower() in _QUIT_COMMANDS:
+                break
+
+            if raw.lower() == "help":
+                _print_help()
+                continue
+
+            resolved = _resolve_input(raw, allow_prompt=True)
+            if resolved.parts is None:
+                print(resolved.error or "Unknown command")
+                print("Try 'help' to see available commands")
+                print()
+                continue
+
+            if resolved.hint is not None:
+                print(resolved.hint)
+
+            exit_code = await _execute_single(client, list(resolved.parts))
+            if exit_code != 0:
+                print(f"(exit code: {exit_code})")
             print()
-            break
-
-        if not raw:
-            continue
-
-        if raw.lower() in _QUIT_COMMANDS:
-            break
-
-        if raw.lower() == "help":
-            _print_help()
-            continue
-
-        resolved = _resolve_input(raw, allow_prompt=True)
-        if resolved.parts is None:
-            print(resolved.error or "Unknown command")
-            print("Try 'help' to see available commands")
-            print()
-            continue
-
-        if resolved.hint is not None:
-            print(resolved.hint)
-
-        exit_code = await _execute_single(client, list(resolved.parts))
-        if exit_code != 0:
-            print(f"(exit code: {exit_code})")
-        print()
+    finally:
+        await _stop_notification_listener(notification_task)
 
     return 0
 
