@@ -636,3 +636,21 @@ class TestDiscoverTestAsync:
             "python3 /root/step.py --help",
             "python /root/step.py -h",
         ]
+
+    @pytest.mark.asyncio
+    async def test_fetch_help_text_raises_on_ssh_auth_failure(self) -> None:
+        from jules_daemon.execution.test_discovery import _fetch_help_text
+        from jules_daemon.ssh.errors import SSHAuthenticationError
+
+        with patch(
+            "jules_daemon.execution.test_discovery._run_help_via_paramiko",
+            side_effect=SSHAuthenticationError("Authentication failed"),
+        ):
+            with pytest.raises(SSHAuthenticationError, match="Authentication failed"):
+                await _fetch_help_text(
+                    host="10.0.0.1",
+                    port=22,
+                    username="root",
+                    credential=None,
+                    command="/root/step.py",
+                )

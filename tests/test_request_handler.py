@@ -2224,6 +2224,61 @@ class TestRequestHandlerDiscoverVerb:
         assert confirm_prompts[1].payload["proposed_command"] == "python /root/step.py -h"
         assert "python /root/step.py --help" in confirm_prompts[1].payload["message"]
 
+    @pytest.mark.asyncio
+    async def test_discover_auth_failure_does_not_prompt_python_fallback(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from jules_daemon.ssh.errors import SSHAuthenticationError
+
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+
+        approve_python3_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="discover-pre-python3-reply",
+            timestamp="2026-04-09T12:00:01Z",
+            payload={"approved": True},
+        )
+        frame = encode_frame(approve_python3_reply)
+        client.reader.readexactly = AsyncMock(
+            side_effect=[frame[:4], frame[4:]],
+        )
+
+        sent_frames: list[bytes] = []
+
+        def _capture_write(data: bytes) -> None:
+            sent_frames.append(data)
+
+        client.writer.write = _capture_write
+
+        with patch(
+            "jules_daemon.ipc.request_handler.discover_test",
+            AsyncMock(side_effect=SSHAuthenticationError("Authentication failed")),
+        ):
+            response = await handler.handle_message(
+                _make_request(payload={
+                    "verb": "discover",
+                    "target_host": "10.0.0.10",
+                    "target_user": "root",
+                    "command": "/root/step.py",
+                }),
+                client,
+            )
+
+        assert response.msg_type == MessageType.ERROR
+        assert "Authentication failed" in response.payload["error"]
+
+        envelopes = [
+            decode_envelope(frame[HEADER_SIZE:]) for frame in sent_frames
+        ]
+        confirm_prompts = [
+            env for env in envelopes if env.msg_type == MessageType.CONFIRM_PROMPT
+        ]
+        assert len(confirm_prompts) == 1
+        assert confirm_prompts[0].payload["proposed_command"] == "python3 /root/step.py -h"
+
 
 # ---------------------------------------------------------------------------
 # RequestHandler: response correlation

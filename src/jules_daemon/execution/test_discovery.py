@@ -284,7 +284,11 @@ async def _fetch_help_text(
     """Run ``command -h``, falling back to ``command --help``.
 
     Returns the combined stdout+stderr plus the base command that produced it,
-    or None on connection/auth failure.
+    or None when the remote command ran but produced no usable help output.
+
+    Raises:
+        SSHAuthenticationError: When SSH authentication fails.
+        SSHConnectionError: When the SSH connection itself fails.
     """
     last_combined = ""
     last_candidate = ""
@@ -307,7 +311,7 @@ async def _fetch_help_text(
                 )
             except (SSHAuthenticationError, SSHConnectionError) as exc:
                 logger.warning("SSH failed while fetching help: %s", exc)
-                return None
+                raise
             except Exception as exc:
                 logger.warning("Unexpected error fetching help: %s", exc)
                 return None
@@ -473,7 +477,12 @@ async def discover_test(
         llm_config: Optional LLMConfig for the LLM call.
 
     Returns:
-        DiscoveredTestSpec on success, None if SSH fails entirely.
+        DiscoveredTestSpec on success, None when the remote probe produced
+        no usable help output.
+
+    Raises:
+        SSHAuthenticationError: When SSH authentication fails.
+        SSHConnectionError: When the SSH connection itself fails.
     """
     credential = resolve_ssh_credentials(host)
     help_result = await _fetch_help_text(
