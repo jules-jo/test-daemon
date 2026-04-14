@@ -581,6 +581,7 @@ class RequestHandler:
             "run": self._handle_run,
             "watch": self._handle_watch,
             "discover": self._handle_discover,
+            "interpret": self._handle_interpret,
             "subscribe_notifications": self._handle_subscribe_notifications,
             "unsubscribe_notifications": self._handle_unsubscribe_notifications,
         }
@@ -616,6 +617,256 @@ class RequestHandler:
             self._config.llm_client is not None
             and self._config.llm_config is not None
         )
+
+    async def _build_interpretation_context(self) -> str:
+        """Build lightweight daemon context for conversational interpretation."""
+        from jules_daemon.wiki.system_info import list_systems
+
+        systems = await self._run_blocking(list_systems, self._config.wiki_root)
+        lines: list[str] = []
+        if systems:
+            lines.append("Known named systems:")
+            for system in systems:
+                aliases = ", ".join(system.aliases) if system.aliases else "(none)"
+                lines.append(
+                    f"- {system.system_name} | aliases: {aliases} | "
+                    f"endpoint: {system.user}@{system.host}:{system.port}"
+                )
+        if self._current_run_id:
+            lines.append(f"Current active run id: {self._current_run_id}")
+        return "\n".join(lines)
+
+    async def _classify_intent_with_llm(
+        self,
+        *,
+        user_input: str,
+        conversation_context: str | None = None,
+    ) -> Any | None:
+        """Classify a conversational request via the daemon's LLM classifier."""
+        if not self._can_use_llm_interpretation:
+            return None
+
+        from jules_daemon.llm.intent_classifier import classify_intent
+
+        def _classify() -> Any:
+            return classify_intent(
+                user_input=user_input,
+                conversation_context=conversation_context,
+                client=self._config.llm_client,  # type: ignore[arg-type]
+                config=self._config.llm_config,  # type: ignore[arg-type]
+            )
+
+        try:
+            return await self._run_blocking(_classify)
+        except Exception as exc:
+            logger.warning(
+                "LLM request interpretation failed for '%s': %s",
+                user_input[:80],
+                exc,
+            )
+            return None
+
+    def _build_payload_from_interpreted_intent(
+        self,
+        *,
+        source_input: str,
+        intent: Any,
+    ) -> dict[str, Any]:
+        """Convert an LLM intent classification into an IPC payload."""
+        params = dict(getattr(intent, "parameters", {}) or {})
+        payload: dict[str, Any] = {"verb": intent.verb.value}
+
+        def _non_empty_str(name: str) -> str | None:
+            value = params.get(name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            return None
+
+        def _int_value(name: str) -> int | None:
+            value = params.get(name)
+            if value in (None, ""):
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        if intent.verb.value == "run":
+            natural_language = _non_empty_str("natural_language") or source_input.strip()
+            payload["natural_language"] = natural_language
+            target_host = _non_empty_str("target_host")
+            target_user = _non_empty_str("target_user")
+            system_name = _non_empty_str("system_name")
+            if target_host and target_user:
+                payload["target_host"] = target_host
+                payload["target_user"] = target_user
+                target_port = _int_value("target_port")
+                if target_port is not None:
+                    payload["target_port"] = target_port
+                key_path = _non_empty_str("key_path")
+                if key_path is not None:
+                    payload["key_path"] = key_path
+            elif system_name is not None:
+                payload["system_name"] = system_name
+            else:
+                payload["interpret_request"] = True
+            return payload
+
+        if intent.verb.value == "queue":
+            natural_language = _non_empty_str("natural_language") or source_input.strip()
+            payload["natural_language"] = natural_language
+            target_host = _non_empty_str("target_host")
+            target_user = _non_empty_str("target_user")
+            if target_host is not None:
+                payload["target_host"] = target_host
+            if target_user is not None:
+                payload["target_user"] = target_user
+            target_port = _int_value("target_port")
+            if target_port is not None:
+                payload["target_port"] = target_port
+            priority = _int_value("priority")
+            if priority is not None:
+                payload["priority"] = priority
+            return payload
+
+        if intent.verb.value == "discover":
+            target_host = _non_empty_str("target_host")
+            target_user = _non_empty_str("target_user")
+            command = _non_empty_str("command")
+            if target_host is not None:
+                payload["target_host"] = target_host
+            if target_user is not None:
+                payload["target_user"] = target_user
+            if command is not None:
+                payload["command"] = command
+            target_port = _int_value("target_port")
+            if target_port is not None:
+                payload["target_port"] = target_port
+            return payload
+
+        if intent.verb.value == "status":
+            verbose = params.get("verbose")
+            if isinstance(verbose, bool):
+                payload["verbose"] = verbose
+            return payload
+
+        if intent.verb.value == "watch":
+            run_id = _non_empty_str("run_id")
+            if run_id is not None:
+                payload["run_id"] = run_id
+            tail_lines = _int_value("tail_lines")
+            if tail_lines is not None:
+                payload["tail_lines"] = tail_lines
+            follow = params.get("follow")
+            if isinstance(follow, bool):
+                payload["follow"] = follow
+            return payload
+
+        if intent.verb.value == "cancel":
+            run_id = _non_empty_str("run_id")
+            if run_id is not None:
+                payload["run_id"] = run_id
+            force = params.get("force")
+            if isinstance(force, bool):
+                payload["force"] = force
+            reason = _non_empty_str("reason")
+            if reason is not None:
+                payload["reason"] = reason
+            return payload
+
+        if intent.verb.value == "history":
+            limit = _int_value("limit")
+            if limit is not None:
+                payload["limit"] = limit
+            status_filter = _non_empty_str("status_filter")
+            if status_filter is not None:
+                payload["status_filter"] = status_filter
+            host_filter = _non_empty_str("host_filter")
+            if host_filter is not None:
+                payload["host_filter"] = host_filter
+            verbose = params.get("verbose")
+            if isinstance(verbose, bool):
+                payload["verbose"] = verbose
+            return payload
+
+        return payload
+
+    def _format_validation_summary(self, result: Any) -> str:
+        """Summarize validator errors into one concise string."""
+        if not getattr(result, "errors", None):
+            return "The daemon could not validate that request."
+        parts = [
+            f"{error.field}: {error.message}"
+            for error in result.errors[:3]
+        ]
+        return "I still need a bit more information: " + "; ".join(parts)
+
+    async def _ask_for_interpretation_clarification(
+        self,
+        *,
+        client: ClientConnection,
+        original_input: str,
+        reason: str,
+    ) -> str | None:
+        """Ask the user to clarify an ambiguous conversational request."""
+        from jules_daemon.agent.ipc_bridge import make_ask_callback
+
+        ask_cb = make_ask_callback(client)
+        return await ask_cb(
+            "Can you clarify what you want Jules to do?",
+            (
+                f"Original request: {original_input}\n\n"
+                f"{reason}\n\n"
+                "You can answer conversationally. Include the target system or "
+                "SSH endpoint when the request needs one."
+            ),
+        )
+
+    async def _dispatch_interpreted_request(
+        self,
+        *,
+        msg_id: str,
+        payload: dict[str, Any],
+        client: ClientConnection,
+    ) -> MessageEnvelope:
+        """Validate and dispatch a daemon-interpreted payload."""
+        synthetic = MessageEnvelope(
+            msg_type=MessageType.REQUEST,
+            msg_id=msg_id,
+            timestamp=_now_iso(),
+            payload=payload,
+        )
+        result = validate_request(synthetic)
+        if not result.is_valid:
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary=(
+                    f"Interpreted request validation failed with "
+                    f"{len(result.errors)} error(s)"
+                ),
+                validation_errors=result.errors_to_dicts(),
+            )
+
+        verb = result.verb
+        if verb is None:
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary="Interpreted request did not resolve to a valid verb",
+                validation_errors=[],
+            )
+
+        async_handler = self._async_client_dispatch.get(verb)
+        if async_handler is not None:
+            return await async_handler(msg_id, result.parsed_payload, client)
+
+        handler = self._verb_dispatch.get(verb)
+        if handler is None:
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary=f"Unhandled interpreted verb: {verb}",
+                validation_errors=[],
+            )
+        return handler(msg_id, result.parsed_payload)
 
     async def handle_message(
         self,
@@ -1931,6 +2182,116 @@ class RequestHandler:
                 "preview": preview,
                 "message": f"Test spec saved to {wiki_path}",
             },
+        )
+
+    async def _handle_interpret(
+        self,
+        msg_id: str,
+        parsed: dict[str, Any],
+        client: ClientConnection,
+    ) -> MessageEnvelope:
+        """Interpret a conversational prompt inside the daemon via the LLM."""
+        raw_input = str(parsed.get("input_text", "")).strip()
+        if not raw_input:
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary="Interpret requests require non-empty input_text",
+                validation_errors=[],
+            )
+        if not self._can_use_llm_interpretation:
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary=(
+                    "Conversational requests require LLM configuration. "
+                    "Use explicit commands or configure the daemon LLM."
+                ),
+                validation_errors=[],
+            )
+
+        from jules_daemon.llm.intent_classifier import IntentConfidence
+
+        context = await self._build_interpretation_context()
+        current_input = raw_input
+
+        for attempt in range(2):
+            intent = await self._classify_intent_with_llm(
+                user_input=current_input,
+                conversation_context=context or None,
+            )
+            if intent is None:
+                return _build_error_response(
+                    msg_id=msg_id,
+                    error_summary=(
+                        "The daemon could not interpret that request with the LLM. "
+                        "Try rephrasing it or use an explicit command."
+                    ),
+                    validation_errors=[],
+                )
+
+            if intent.confidence is IntentConfidence.LOW:
+                clarification = await self._ask_for_interpretation_clarification(
+                    client=client,
+                    original_input=raw_input,
+                    reason=(
+                        f"I'm not fully sure what you mean yet. "
+                        f"My current guess is '{intent.verb.value}'."
+                    ),
+                )
+                if clarification is None:
+                    return _build_success_response(
+                        msg_id=msg_id,
+                        verb="interpret",
+                        extra={
+                            "status": "cancelled",
+                            "message": "Interpretation cancelled.",
+                        },
+                    )
+                current_input = (
+                    f"{raw_input}\nUser clarification: {clarification.strip()}"
+                )
+                continue
+
+            payload = self._build_payload_from_interpreted_intent(
+                source_input=current_input,
+                intent=intent,
+            )
+            synthetic = MessageEnvelope(
+                msg_type=MessageType.REQUEST,
+                msg_id=msg_id,
+                timestamp=_now_iso(),
+                payload=payload,
+            )
+            validation = validate_request(synthetic)
+            if validation.is_valid:
+                return await self._dispatch_interpreted_request(
+                    msg_id=msg_id,
+                    payload=payload,
+                    client=client,
+                )
+
+            clarification = await self._ask_for_interpretation_clarification(
+                client=client,
+                original_input=raw_input,
+                reason=self._format_validation_summary(validation),
+            )
+            if clarification is None:
+                return _build_success_response(
+                    msg_id=msg_id,
+                    verb="interpret",
+                    extra={
+                        "status": "cancelled",
+                        "message": "Interpretation cancelled.",
+                    },
+                )
+            current_input = f"{raw_input}\nUser clarification: {clarification.strip()}"
+
+        return _build_error_response(
+            msg_id=msg_id,
+            error_summary=(
+                "The daemon still could not resolve that conversational request. "
+                "Try rephrasing it or use an explicit command."
+            ),
+            validation_errors=[],
         )
 
     async def _handle_run(

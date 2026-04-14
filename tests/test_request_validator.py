@@ -443,6 +443,21 @@ class TestValidateRequestRunFields:
         assert result.is_valid is False
         assert any(e.code == "conflicting_fields" for e in result.errors)
 
+    def test_interpret_valid(self) -> None:
+        envelope = _make_envelope(payload={
+            "verb": "interpret",
+            "input_text": "give me the current status",
+        })
+        result = validate_request(envelope)
+        assert result.is_valid is True
+        assert result.parsed_payload["input_text"] == "give me the current status"
+
+    def test_interpret_requires_input_text(self) -> None:
+        envelope = _make_envelope(payload={"verb": "interpret"})
+        result = validate_request(envelope)
+        assert result.is_valid is False
+        assert any(e.field == "input_text" for e in result.errors)
+
     def test_run_with_optional_fields(self) -> None:
         envelope = _make_envelope(payload={
             "verb": "run",

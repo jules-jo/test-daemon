@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from jules_daemon.cli.verbs import Verb
 from jules_daemon.ipc.framing import (
     HEADER_SIZE,
     MessageEnvelope,
@@ -34,6 +35,10 @@ from jules_daemon.ipc.request_handler import (
 )
 from jules_daemon.protocol.notifications import NotificationEventType
 from jules_daemon.ipc.server import ClientConnection
+from jules_daemon.llm.intent_classifier import (
+    ClassifiedIntent,
+    IntentConfidence,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +80,19 @@ def _make_non_request(
         msg_id=msg_id,
         timestamp="2026-04-09T12:00:00Z",
         payload=payload,
+    )
+
+
+def _make_llm_handler(tmp_path: Path) -> RequestHandler:
+    """Build a RequestHandler with mocked LLM config enabled."""
+    llm_config = MagicMock()
+    llm_config.default_model = "provider:connection:model-v1"
+    return RequestHandler(
+        config=RequestHandlerConfig(
+            wiki_root=tmp_path,
+            llm_client=MagicMock(),
+            llm_config=llm_config,
+        ),
     )
 
 
@@ -1801,6 +1819,241 @@ class TestRequestHandlerRunVerb:
         assert run_args["target_host"] == "10.0.0.10"
         assert run_args["target_user"] == "root"
         assert run_args["natural_language"] == "run smoke tests. 1 iteration"
+
+
+# ---------------------------------------------------------------------------
+# RequestHandler: daemon-side interpret verb
+# ---------------------------------------------------------------------------
+
+
+class TestRequestHandlerInterpretVerb:
+    """Tests for daemon-side conversational interpretation dispatch."""
+
+    @pytest.mark.asyncio
+    async def test_interpret_requires_llm_configuration(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        handler = RequestHandler(config=RequestHandlerConfig(wiki_root=tmp_path))
+        client = _make_client()
+
+        response = await handler.handle_message(
+            _make_request(payload={
+                "verb": "interpret",
+                "input_text": "give me the current status",
+            }),
+            client,
+        )
+
+        assert response.msg_type == MessageType.ERROR
+        assert "Conversational requests require LLM configuration" in (
+            response.payload["error"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_interpret_status_dispatches_to_status(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        handler = _make_llm_handler(tmp_path)
+        client = _make_client()
+        intent = ClassifiedIntent(
+            verb=Verb.STATUS,
+            confidence=IntentConfidence.HIGH,
+            parameters={"verbose": True},
+            raw_input="give me the current status",
+            reasoning="The user wants status.",
+        )
+
+        with patch.object(
+            handler,
+            "_classify_intent_with_llm",
+            AsyncMock(return_value=intent),
+        ):
+            response = await handler.handle_message(
+                _make_request(payload={
+                    "verb": "interpret",
+                    "input_text": "give me the current status",
+                }),
+                client,
+            )
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["verb"] == "status"
+
+    @pytest.mark.asyncio
+    async def test_interpret_run_dispatches_to_run_with_interpret_request(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        handler = _make_llm_handler(tmp_path)
+        client = _make_client()
+        intent = ClassifiedIntent(
+            verb=Verb.RUN,
+            confidence=IntentConfidence.HIGH,
+            parameters={"natural_language": "run the smoke tests"},
+            raw_input="run the smoke tests in tuto",
+            reasoning="The user wants to start a test run.",
+        )
+        expected = MessageEnvelope(
+            msg_type=MessageType.RESPONSE,
+            msg_id="req-001",
+            timestamp="2026-04-09T12:00:02Z",
+            payload={"verb": "run", "status": "started"},
+        )
+        run_handler = AsyncMock(return_value=expected)
+        handler._async_client_dispatch["run"] = run_handler
+
+        with patch.object(
+            handler,
+            "_classify_intent_with_llm",
+            AsyncMock(return_value=intent),
+        ):
+            response = await handler.handle_message(
+                _make_request(payload={
+                    "verb": "interpret",
+                    "input_text": "run the smoke tests in tuto",
+                }),
+                client,
+            )
+
+        assert response == expected
+        parsed_run = run_handler.await_args.args[1]
+        assert parsed_run["natural_language"] == "run the smoke tests"
+        assert parsed_run["interpret_request"] is True
+
+    @pytest.mark.asyncio
+    async def test_interpret_low_confidence_asks_for_clarification_then_dispatches(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        handler = _make_llm_handler(tmp_path)
+        client = _make_client()
+        ask_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="ask-interpret-001",
+            timestamp="2026-04-09T12:00:01Z",
+            payload={"approved": True, "answer": "Just show the active run."},
+        )
+        ask_frame = encode_frame(ask_reply)
+        client.reader.readexactly = AsyncMock(
+            side_effect=[ask_frame[:4], ask_frame[4:]]
+        )
+        low_intent = ClassifiedIntent(
+            verb=Verb.STATUS,
+            confidence=IntentConfidence.LOW,
+            parameters={},
+            raw_input="what's going on",
+            reasoning="This might be a status request, but it is ambiguous.",
+        )
+        high_intent = ClassifiedIntent(
+            verb=Verb.STATUS,
+            confidence=IntentConfidence.HIGH,
+            parameters={},
+            raw_input="what's going on",
+            reasoning="The clarified request is status.",
+        )
+
+        with patch.object(
+            handler,
+            "_classify_intent_with_llm",
+            AsyncMock(side_effect=[low_intent, high_intent]),
+        ):
+            response = await handler.handle_message(
+                _make_request(payload={
+                    "verb": "interpret",
+                    "input_text": "what's going on",
+                }),
+                client,
+            )
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["verb"] == "status"
+        prompt_bytes = b"".join(
+            call.args[0] for call in client.writer.write.call_args_list
+        )
+        prompt_length = unpack_header(prompt_bytes[:HEADER_SIZE])
+        prompt = decode_envelope(
+            prompt_bytes[HEADER_SIZE:HEADER_SIZE + prompt_length]
+        )
+        assert prompt.msg_type == MessageType.CONFIRM_PROMPT
+        assert prompt.payload["type"] == "question"
+        assert "Can you clarify" in prompt.payload["question"]
+
+    @pytest.mark.asyncio
+    async def test_interpret_validation_error_asks_for_clarification_then_retries(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        handler = _make_llm_handler(tmp_path)
+        client = _make_client()
+        ask_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="ask-interpret-002",
+            timestamp="2026-04-09T12:00:01Z",
+            payload={
+                "approved": True,
+                "answer": "Use deploy@staging and command python3 test.py -h.",
+            },
+        )
+        ask_frame = encode_frame(ask_reply)
+        client.reader.readexactly = AsyncMock(
+            side_effect=[ask_frame[:4], ask_frame[4:]]
+        )
+        invalid_intent = ClassifiedIntent(
+            verb=Verb.DISCOVER,
+            confidence=IntentConfidence.HIGH,
+            parameters={},
+            raw_input="discover that test",
+            reasoning="The user wants discovery, but fields are missing.",
+        )
+        valid_intent = ClassifiedIntent(
+            verb=Verb.DISCOVER,
+            confidence=IntentConfidence.HIGH,
+            parameters={
+                "target_host": "staging.example.com",
+                "target_user": "deploy",
+                "command": "python3 test.py -h",
+            },
+            raw_input="discover that test",
+            reasoning="The clarified request has the required SSH target.",
+        )
+        expected = MessageEnvelope(
+            msg_type=MessageType.RESPONSE,
+            msg_id="req-001",
+            timestamp="2026-04-09T12:00:02Z",
+            payload={"verb": "discover", "status": "ok"},
+        )
+        discover_handler = AsyncMock(return_value=expected)
+        handler._async_client_dispatch["discover"] = discover_handler
+
+        with patch.object(
+            handler,
+            "_classify_intent_with_llm",
+            AsyncMock(side_effect=[invalid_intent, valid_intent]),
+        ):
+            response = await handler.handle_message(
+                _make_request(payload={
+                    "verb": "interpret",
+                    "input_text": "discover that test",
+                }),
+                client,
+            )
+
+        assert response == expected
+        parsed_discover = discover_handler.await_args.args[1]
+        assert parsed_discover["target_host"] == "staging.example.com"
+        assert parsed_discover["target_user"] == "deploy"
+        assert parsed_discover["command"] == "python3 test.py -h"
+        prompt_bytes = b"".join(
+            call.args[0] for call in client.writer.write.call_args_list
+        )
+        prompt_length = unpack_header(prompt_bytes[:HEADER_SIZE])
+        prompt = decode_envelope(
+            prompt_bytes[HEADER_SIZE:HEADER_SIZE + prompt_length]
+        )
+        assert prompt.payload["type"] == "question"
+        assert "I still need a bit more information" in prompt.payload["context"]
 
 
 # ---------------------------------------------------------------------------

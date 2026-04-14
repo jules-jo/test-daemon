@@ -39,6 +39,7 @@ _QUIT_COMMANDS = frozenset({"quit", "exit", "q", "c"})
 # Verb routing table: maps user-facing verb strings to thin client methods.
 _VERB_MAP = frozenset({
     "status", "history", "cancel", "run", "watch", "health", "discover",
+    "interpret",
 })
 
 # Ordered tuple of verbs used for fuzzy typo correction. Kept as a
@@ -238,6 +239,14 @@ async def _execute_single(
             run_id=run_id,
             force=force,
             reason=reason,
+        )
+
+    elif verb == "interpret":
+        if not remaining:
+            print("Usage: jules interpret <conversational request>")
+            return 1
+        result = await client.interpret(
+            input_text=" ".join(remaining),
         )
 
     elif verb == "run":
@@ -586,87 +595,33 @@ def _resolve_input(
 ) -> _ResolvedInput:
     """Resolve raw CLI input into dispatchable argv tokens.
 
-    Structured commands pass through unchanged. Bare natural-language run
-    requests are rewritten into the existing explicit ``run`` syntax so the
-    rest of the thin client can stay unchanged.
+    The active user path is daemon-side interpretation: nearly all user
+    input is forwarded verbatim to the daemon's LLM intent layer.
+
+    We keep two tiny local escape hatches only:
+    - ``health`` remains a direct transport/liveness probe
+    - ``interpret ...`` remains available as an explicit debug path
+
+    The older local front-door helpers still exist in this module, but
+    they are no longer part of the normal CLI flow.
     """
     parts = raw.split()
     if not parts:
         return _ResolvedInput(parts=None, error="Empty input.")
 
     first_word = parts[0].lower()
-
-    # Layer 1: exact match against the known verb set. Keep the explicit
-    # syntax for structured commands, but let conversational ``run ...``
-    # input fall through to NL resolution when the target token is missing.
-    if first_word in _KNOWN_VERBS:
-        if first_word != "run" or _looks_like_structured_run(parts):
-            return _ResolvedInput(parts=tuple(parts))
-        extracted_args = _extract_natural_language_run(raw)
-        if extracted_args is None:
-            return _ResolvedInput(
-                parts=None,
-                error=(
-                    "Run requests must include an SSH target like user@host[:port]. "
-                    "Example: run the smoke tests on deploy@staging"
-                ),
-            )
-        return _resolve_natural_language_run(
-            raw,
-            extracted_args,
-            allow_prompt=allow_prompt,
-        )
-
-    interpreted = _classify_interpreted_input(raw)
-    if interpreted is not None and interpreted.input_type != InputType.COMMAND:
-        if interpreted.canonical_verb == "run":
-            return _resolve_natural_language_run(
-                raw,
-                dict(interpreted.extracted_args),
-                allow_prompt=allow_prompt,
-            )
+    if first_word == "health" and len(parts) == 1:
+        return _ResolvedInput(parts=("health",))
+    if first_word == "interpret":
+        if len(parts) == 1:
+            return _ResolvedInput(parts=("interpret",))
         return _ResolvedInput(
-            parts=(interpreted.canonical_verb,),
-            hint=f"(interpreted as '{interpreted.canonical_verb}')",
-        )
-
-    # Layer 2: fuzzy match to correct typos. Only the first token is
-    # rewritten; the remaining tokens (e.g., ``user@host`` targets and
-    # test descriptions for ``run``) are passed through verbatim.
-    fuzzy_verb = _fuzzy_match_verb(first_word)
-    if fuzzy_verb is not None:
-        corrected = [fuzzy_verb, *parts[1:]]
-        if fuzzy_verb == "run" and not _looks_like_structured_run(corrected):
-            extracted_args = _extract_natural_language_run(raw)
-            if extracted_args is not None:
-                return _resolve_natural_language_run(
-                    raw,
-                    extracted_args,
-                    allow_prompt=allow_prompt,
-                )
-        return _ResolvedInput(
-            parts=tuple(corrected),
-            hint=f"(interpreted as '{fuzzy_verb}')",
-        )
-
-    # Layer 3: classifier fallback for natural language. When the
-    # classifier is confident we dispatch to the canonical verb. ``run``
-    # is special because it needs both a target and the original free-form
-    # prompt text.
-    interpreted = _classify_interpreted_input(raw)
-    if interpreted is None:
-        return _ResolvedInput(parts=None, error=f"Unknown command: {first_word}")
-
-    if interpreted.canonical_verb == "run":
-        return _resolve_natural_language_run(
-            raw,
-            dict(interpreted.extracted_args),
-            allow_prompt=allow_prompt,
+            parts=("interpret", raw[len(parts[0]):].strip()),
         )
 
     return _ResolvedInput(
-        parts=(interpreted.canonical_verb,),
-        hint=f"(interpreted as '{interpreted.canonical_verb}')",
+        parts=("interpret", raw),
+        hint="(sent to daemon for interpretation)",
     )
 
 
@@ -729,23 +684,21 @@ async def _repl(client: ThinClient) -> int:
 def _print_help() -> None:
     """Print available commands for the REPL."""
     print("Available commands:")
-    print("  status [--verbose]            Query current run state")
-    print("  watch [--run-id ID] [--tail N] Stream output from a run")
-    print("  run user@host description     Start a test execution")
-    print("  run --system NAME description Start a test execution via system alias")
-    print("  run --infer-target description Ask daemon to infer system alias from NL")
-    print("  run --interpret-request description")
-    print("                                Ask daemon to interpret unresolved run prompts")
+    print("  Any status/watch/run/history/cancel/discover request")
+    print("                                Sent to daemon LLM interpretation")
+    print("  status --verbose              Explicit syntax still works via daemon interpretation")
+    print("  run user@host description     Explicit syntax still works via daemon interpretation")
     print("  run the smoke tests on deploy@staging")
-    print("                                Natural-language run request")
+    print("                                Conversational request interpreted by daemon")
     print("  run the smoke tests in tuto")
-    print("                                Natural-language run request via inferred system alias")
+    print("                                Conversational request interpreted by daemon")
     print("  run the smoke tests in system tuto")
-    print("                                Natural-language run request via system alias")
+    print("                                Conversational request interpreted by daemon")
+    print("  give me the current status")
+    print("                                Any other conversational request goes to the daemon LLM")
     print("  discover user@host command    Auto-discover test spec via -h")
-    print("  cancel [--force] [--run-id ID] Cancel a run")
-    print("  history [--limit N] [--status S] View past results")
-    print("  health                        Check daemon liveness")
+    print("  health                        Direct daemon liveness probe")
+    print("  interpret <request>           Internal debug path for daemon interpretation")
     print("  help                          Show this help")
     print("  quit / c / Ctrl+C             Exit the CLI")
 

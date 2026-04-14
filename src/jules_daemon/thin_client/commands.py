@@ -30,6 +30,7 @@ __all__ = [
     "build_discover_request",
     "build_health_request",
     "build_history_request",
+    "build_interpret_request",
     "build_run_request",
     "build_status_request",
     "build_watch_request",
@@ -186,6 +187,31 @@ def build_history_request(
         msg_id=_generate_msg_id(),
         timestamp=_now_iso(),
         payload=payload,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Interpret
+# ---------------------------------------------------------------------------
+
+
+def build_interpret_request(*, input_text: str) -> MessageEnvelope:
+    """Build an interpret REQUEST envelope.
+
+    ``interpret`` is an internal daemon-side entry point for conversational
+    prompts that are not already explicit CLI commands.
+    """
+    if not input_text or not input_text.strip():
+        raise ValueError("input_text must not be empty")
+
+    return MessageEnvelope(
+        msg_type=MessageType.REQUEST,
+        msg_id=_generate_msg_id(),
+        timestamp=_now_iso(),
+        payload={
+            "verb": "interpret",
+            "input_text": input_text.strip(),
+        },
     )
 
 

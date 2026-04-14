@@ -45,3 +45,6 @@ SSH command approval prompts now show named-system context alongside the resolve
 
 ## [2026-04-14] design | Recorded hybrid plan for broader natural-language request handling
 Added `wiki/pages/architecture/agent-driven-request-interpretation.md` to capture the next-step design direction: keep only a thin deterministic front door for obvious structured commands, let unresolved conversational run requests fall into a daemon-side agent interpretation path, and keep final target validation, approvals, execution, monitoring, and recovery deterministic in daemon code.
+
+## [2026-04-14] implementation | Switched the active CLI path to daemon-side interpretation
+The legacy CLI front door is still present in code for fallback/reference, but the active `cli_main` flow now forwards nearly all user requests through a daemon-side `interpret` verb. The daemon uses the LLM intent classifier to map conversational prompts to structured verbs, retries once with a follow-up clarification question when confidence or validation is insufficient, and then dispatches into the existing `run` / `status` / `watch` / `cancel` / `history` / `discover` handlers.

@@ -50,7 +50,8 @@ __all__ = [
 
 _VALID_VERBS: frozenset[str] = frozenset({
     "status", "watch", "run", "queue", "cancel", "history", "handshake",
-    "discover", "subscribe_notifications", "unsubscribe_notifications",
+    "discover", "interpret",
+    "subscribe_notifications", "unsubscribe_notifications",
 })
 
 # Valid output formats for the watch verb
@@ -745,6 +746,18 @@ def _validate_discover_fields(
     return parsed
 
 
+def _validate_interpret_fields(
+    payload: dict[str, Any],
+    errors: list[ValidationError],
+) -> dict[str, Any]:
+    """Validate conversational interpretation requests."""
+    parsed: dict[str, Any] = {}
+    input_text = _require_non_empty_string(payload, "input_text", errors)
+    if input_text is not None:
+        parsed["input_text"] = input_text
+    return parsed
+
+
 def _validate_subscribe_notification_fields(
     payload: dict[str, Any],
     errors: list[ValidationError],
@@ -813,6 +826,7 @@ _VERB_VALIDATORS: dict[str, _VerbValidator] = {
     "history": _validate_history_fields,
     "status": _validate_status_fields,
     "discover": _validate_discover_fields,
+    "interpret": _validate_interpret_fields,
     "subscribe_notifications": _validate_subscribe_notification_fields,
     "unsubscribe_notifications": _validate_unsubscribe_notification_fields,
 }

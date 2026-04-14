@@ -69,6 +69,7 @@ from jules_daemon.thin_client.commands import (
     build_discover_request,
     build_health_request,
     build_history_request,
+    build_interpret_request,
     build_run_request,
     build_status_request,
     build_watch_request,
@@ -286,6 +287,24 @@ class ThinClient:
                 error=str(exc),
             )
         return await self._execute_command("history", envelope)
+
+    async def interpret(
+        self,
+        *,
+        input_text: str,
+    ) -> CommandResult:
+        """Send a conversational prompt to the daemon for interpretation."""
+        try:
+            envelope = build_interpret_request(input_text=input_text)
+        except ValueError as exc:
+            return CommandResult(
+                success=False,
+                verb="interpret",
+                response=None,
+                rendered=f"Invalid parameters: {exc}",
+                error=str(exc),
+            )
+        return await self._execute_with_confirmation("interpret", envelope)
 
     async def cancel(
         self,

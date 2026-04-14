@@ -20,6 +20,7 @@ from jules_daemon.thin_client.commands import (
     build_confirm_reply,
     build_health_request,
     build_history_request,
+    build_interpret_request,
     build_run_request,
     build_status_request,
     build_watch_request,
@@ -202,6 +203,24 @@ class TestBuildHistoryRequest:
     def test_boundary_limit_1000(self):
         envelope = build_history_request(limit=1000)
         assert envelope.payload["limit"] == 1000
+
+
+# ---------------------------------------------------------------------------
+# Interpret request
+# ---------------------------------------------------------------------------
+
+
+class TestBuildInterpretRequest:
+    """Tests for the daemon-side conversational interpretation request."""
+
+    def test_valid_interpret_request(self):
+        envelope = build_interpret_request(input_text="give me the current status")
+        _assert_valid_envelope(envelope, "interpret")
+        assert envelope.payload["input_text"] == "give me the current status"
+
+    def test_empty_input_rejected(self):
+        with pytest.raises(ValueError, match="input_text must not be empty"):
+            build_interpret_request(input_text="")
 
 
 # ---------------------------------------------------------------------------

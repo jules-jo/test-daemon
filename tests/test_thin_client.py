@@ -508,6 +508,23 @@ class TestThinClientRun:
         assert "system_name" not in sent.payload
 
     @pytest.mark.asyncio
+    async def test_interpret_with_confirmation_loop(self):
+        """Conversational prompts use the daemon interpret entry point."""
+        response = _make_response("status", extra={"state": "idle"})
+        conn = _make_mock_connection(responses=[response])
+
+        client = ThinClient()
+        with patch.object(client, "_create_connection", return_value=conn):
+            result = await client.interpret(
+                input_text="give me the current status",
+            )
+
+        assert result.success is True
+        sent = conn.send.call_args_list[0][0][0]
+        assert sent.payload["verb"] == "interpret"
+        assert sent.payload["input_text"] == "give me the current status"
+
+    @pytest.mark.asyncio
     async def test_run_with_confirmation_approved(self):
         """Daemon sends CONFIRM_PROMPT, user approves, daemon responds."""
         prompt = _make_confirm_prompt(command="pytest -v")

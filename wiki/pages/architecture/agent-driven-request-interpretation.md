@@ -21,6 +21,10 @@ sources:
 
 The project should move toward a thinner deterministic front door and a broader agent-driven interpretation layer for natural-language requests.
 
+## Current Status
+
+As of 2026-04-14, the active `cli_main` path now forwards nearly all user requests into a daemon-side `interpret` verb instead of classifying `run` / `status` / `watch` / `cancel` locally. The older front-door helpers still exist in `cli_main.py`, but they are no longer the primary user path.
+
 The current system works best when the CLI can already identify:
 
 - the canonical verb
@@ -114,4 +118,3 @@ The preferred design is not "heuristics only" and not "LLM only". It is:
 - The daemon needs an interpretation mode for raw conversational run prompts.
 - Missing-argument questioning remains appropriate inside the agent loop.
 - System alias resolution should stay daemon-side and wiki-backed, even when the LLM proposes the alias.
-

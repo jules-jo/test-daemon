@@ -918,6 +918,7 @@ class TestHandlerInitBackwardCompat:
             "run",
             "watch",
             "discover",
+            "interpret",
             "subscribe_notifications",
             "unsubscribe_notifications",
         }
