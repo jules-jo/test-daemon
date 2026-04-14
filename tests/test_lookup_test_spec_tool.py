@@ -60,6 +60,7 @@ def _save_knowledge(
     command: str = "python3 ~/agent_test.py",
     purpose: str = "Tests the agent loop",
     output_format: str = "iteration counts",
+    test_file_path: str = "",
     summary_fields: tuple[str, ...] = ("passed", "failed", "iterations_done"),
     common_failures: tuple[str, ...] = ("timeout on large inputs",),
     normal_behavior: str = "All iterations pass",
@@ -77,6 +78,7 @@ def _save_knowledge(
         command_pattern=command,
         purpose=purpose,
         output_format=output_format,
+        test_file_path=test_file_path,
         summary_fields=summary_fields,
         common_failures=common_failures,
         normal_behavior=normal_behavior,
@@ -789,6 +791,7 @@ class TestJsonOutputStructure:
             "command_pattern",
             "purpose",
             "output_format",
+            "test_file_path",
             "summary_fields",
             "common_failures",
             "normal_behavior",
@@ -831,6 +834,27 @@ class TestJsonOutputStructure:
         data = json.loads(result.output)
         assert isinstance(data["common_failures"], list)
         assert len(data["common_failures"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_test_file_path_is_returned(
+        self, wiki_root: Path, tool: LookupTestSpecTool
+    ) -> None:
+        """test_file_path should round-trip through the lookup result."""
+        _save_knowledge(
+            wiki_root,
+            command="python3 /root/tests/step.py --target {target}",
+            test_file_path="/root/tests/step.py",
+            required_args=("target",),
+        )
+
+        result = await tool.execute(
+            call_id="schema-file-path",
+            args={"test_name": "step"},
+        )
+
+        data = json.loads(result.output)
+        assert data["found"] is True
+        assert data["test_file_path"] == "/root/tests/step.py"
 
     @pytest.mark.asyncio
     async def test_required_args_is_list(

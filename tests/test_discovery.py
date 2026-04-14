@@ -232,6 +232,26 @@ class TestSaveDiscoveredSpec:
         assert "type: test-spec" in content
         assert "discovered_from_host: myhost" in content
         assert "command_pattern: python3 test.py -n {name}" in content
+        assert "test_file_path: test.py" in content
+
+    def test_persists_full_test_file_path(self, tmp_path: Path) -> None:
+        spec = DiscoveredTestSpec(
+            command_template="python3 /root/tests/step.py --target {target}",
+            required_args=("target",),
+            optional_args=(),
+            arg_descriptions={"target": "Target id"},
+            typical_duration=None,
+            raw_help_text="usage: step.py [-h] --target TARGET",
+        )
+        result_path = save_discovered_spec(
+            wiki_root=tmp_path,
+            spec=spec,
+            command="python3 /root/tests/step.py",
+            host="myhost",
+        )
+        content = result_path.read_text(encoding="utf-8")
+        assert "test_file_path: /root/tests/step.py" in content
+        assert "`/root/tests/step.py`" in content
 
     def test_no_temp_file_left(self, tmp_path: Path) -> None:
         spec = DiscoveredTestSpec(

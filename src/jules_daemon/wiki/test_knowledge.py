@@ -141,6 +141,9 @@ class TestKnowledge:
         purpose: One sentence describing what the test does.
         output_format: Short description of how to read the test output
             (counts, log lines, custom format).
+        test_file_path: Full script or test path when this knowledge is
+            tied to a concrete file on disk (for example
+            ``/root/step.py``). Empty when the test is not file-backed.
         summary_fields: Ordered tuple of fields that matter most when
             summarizing status or completion for this test (for example
             ``("passed", "failed", "iterations_done")``).
@@ -164,6 +167,7 @@ class TestKnowledge:
     command_pattern: str
     purpose: str = ""
     output_format: str = ""
+    test_file_path: str = ""
     summary_fields: tuple[str, ...] = field(default_factory=tuple)
     common_failures: tuple[str, ...] = field(default_factory=tuple)
     normal_behavior: str = ""
@@ -194,6 +198,8 @@ class TestKnowledge:
             lines.append(f"- Purpose: {self.purpose}")
         if self.output_format:
             lines.append(f"- Output format: {self.output_format}")
+        if self.test_file_path:
+            lines.append(f"- Test file path: {self.test_file_path}")
         if self.summary_fields:
             lines.append(
                 f"- Summary fields: {', '.join(self.summary_fields)}"
@@ -446,6 +452,7 @@ def _knowledge_to_frontmatter(knowledge: TestKnowledge) -> dict[str, Any]:
         "command_pattern": knowledge.command_pattern,
         "purpose": knowledge.purpose,
         "output_format": knowledge.output_format,
+        "test_file_path": knowledge.test_file_path,
         "summary_fields": list(knowledge.summary_fields),
         "normal_behavior": knowledge.normal_behavior,
         "required_args": list(knowledge.required_args),
@@ -526,6 +533,7 @@ def _frontmatter_to_knowledge(fm: dict[str, Any]) -> TestKnowledge:
         command_pattern=command_pattern,
         purpose=_coerce_string(fm.get("purpose")),
         output_format=_coerce_string(fm.get("output_format")),
+        test_file_path=_coerce_string(fm.get("test_file_path")),
         summary_fields=_coerce_required_args(fm.get("summary_fields")),
         normal_behavior=_coerce_string(fm.get("normal_behavior")),
         required_args=_coerce_required_args(fm.get("required_args")),
@@ -563,6 +571,13 @@ def _build_body(knowledge: TestKnowledge) -> str:
             "## Output Format",
             "",
             knowledge.output_format,
+            "",
+        ])
+    if knowledge.test_file_path:
+        lines.extend([
+            "## Test File Path",
+            "",
+            f"`{knowledge.test_file_path}`",
             "",
         ])
     if knowledge.summary_fields:

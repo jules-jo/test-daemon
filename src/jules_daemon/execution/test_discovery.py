@@ -615,6 +615,37 @@ def format_spec_preview(spec: DiscoveredTestSpec) -> str:
     return "\n".join(lines)
 
 
+def _extract_test_file_path(command: str) -> str:
+    """Best-effort extraction of the concrete script/test path from a command."""
+    raw = command.strip()
+    if not raw:
+        return ""
+
+    try:
+        tokens = shlex.split(raw, posix=True)
+    except ValueError:
+        tokens = raw.split()
+
+    for token in tokens:
+        stripped = token.strip()
+        if not stripped or stripped.startswith("-"):
+            continue
+        if "=" in stripped and "/" not in stripped and "\\" not in stripped:
+            continue
+        base_name = Path(stripped).name.lower()
+        if base_name in _PYTHON_INTERPRETER_NAMES:
+            continue
+        if (
+            "/" in stripped
+            or "\\" in stripped
+            or stripped.lower().endswith((
+                ".py", ".pyw", ".sh", ".bash", ".zsh", ".rb", ".pl", ".php", ".js", ".ts"
+            ))
+        ):
+            return stripped
+    return ""
+
+
 def save_discovered_spec(
     wiki_root: Path,
     spec: DiscoveredTestSpec,
@@ -648,6 +679,7 @@ def save_discovered_spec(
     raw_name = name_parts[-1] if name_parts else slug
     # Strip path and extension
     raw_name = _os.path.splitext(_os.path.basename(raw_name))[0]
+    test_file_path = _extract_test_file_path(command)
 
     fm: dict[str, Any] = {
         "tags": list(_WIKI_TAGS),
@@ -656,6 +688,7 @@ def save_discovered_spec(
         "test_slug": slug,
         "command_pattern": spec.command_template,
         "command_template": spec.command_template,
+        "test_file_path": test_file_path,
         "required_args": list(spec.required_args),
         "optional_args": list(spec.optional_args),
         "arg_descriptions": dict(spec.arg_descriptions),
@@ -675,6 +708,14 @@ def save_discovered_spec(
         "```",
         "",
     ]
+
+    if test_file_path:
+        body_lines.extend([
+            "## Test File Path",
+            "",
+            f"`{test_file_path}`",
+            "",
+        ])
 
     if spec.required_args:
         body_lines.extend(["## Required Arguments", ""])
