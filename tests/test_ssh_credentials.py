@@ -25,6 +25,7 @@ import pytest
 from jules_daemon.ssh.credentials import (
     REDACTED,
     SSHCredential,
+    build_missing_password_guidance,
     load_credentials_file,
     resolve_ssh_credentials,
 )
@@ -457,6 +458,14 @@ class TestResolveSSHCredentials:
 
         assert result is not None
         assert "ultra-secret" not in result.source
+
+
+class TestMissingPasswordGuidance:
+    def test_guidance_mentions_default_file_and_env_var(self) -> None:
+        message = build_missing_password_guidance()
+        assert ".jules" in message
+        assert "ssh_credentials.yaml" in message
+        assert "JULES_SSH_PASSWORD" in message
 
 
 # ---------------------------------------------------------------------------

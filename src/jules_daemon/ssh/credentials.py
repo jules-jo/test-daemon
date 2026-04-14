@@ -49,6 +49,7 @@ import yaml
 __all__ = [
     "REDACTED",
     "SSHCredential",
+    "build_missing_password_guidance",
     "load_credentials_file",
     "resolve_ssh_credentials",
 ]
@@ -185,6 +186,18 @@ def _resolve_credentials_path(explicit: Path | None) -> Path:
         return Path(env_path)
 
     return _DEFAULT_CREDENTIALS_PATH
+
+
+def build_missing_password_guidance(
+    credentials_file_path: Path | None = None,
+) -> str:
+    """Return user-facing guidance for hosts without stored passwords."""
+    resolved_path = _resolve_credentials_path(credentials_file_path)
+    return (
+        "No stored SSH password was found. Jules will try key-based auth. "
+        f"If this host requires a password, add it to {resolved_path} "
+        f"or set {_ENV_PASSWORD}."
+    )
 
 
 def _parse_credentials_data(

@@ -94,6 +94,9 @@ def render_confirm_prompt(envelope: MessageEnvelope) -> str:
     system_hostname = payload.get("system_hostname", "")
     system_ip_address = payload.get("system_ip_address", "")
     system_description = payload.get("system_description", "")
+    auth_mode = payload.get("auth_mode", "")
+    credential_source = payload.get("credential_source", "")
+    credential_guidance = payload.get("credential_guidance", "")
     risk_level = payload.get("risk_level", "")
     explanation = payload.get("explanation", "")
     # Custom title and message for non-SSH prompts (e.g., discover save)
@@ -132,6 +135,13 @@ def render_confirm_prompt(envelope: MessageEnvelope) -> str:
             lines.append(f"  Target:      {target_label}")
         if system_description:
             lines.append(f"  Description: {system_description}")
+        if auth_mode == "password":
+            source_text = credential_source or "stored password"
+            lines.append(f"  Auth:        {source_text}")
+        elif auth_mode == "key-based":
+            lines.append("  Auth:        key-based (no stored password found)")
+        if credential_guidance:
+            lines.append(f"  Hint:        {credential_guidance}")
 
     # Show message if provided (used for non-SSH prompts), else show command
     if message and prompt_title:

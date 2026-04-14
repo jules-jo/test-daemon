@@ -161,6 +161,8 @@ class TestMakeConfirmCallback:
                 "resolved_system_hostname": "tuto.internal.example",
                 "resolved_system_ip_address": "10.0.0.10",
                 "resolved_system_description": "Tutorial box",
+                "auth_mode": "key-based",
+                "credential_guidance": "Set JULES_SSH_PASSWORD",
             },
         )
         await callback("pytest -v", "10.0.0.10", "Test run")
@@ -175,6 +177,8 @@ class TestMakeConfirmCallback:
         assert prompt.payload["system_ip_address"] == "10.0.0.10"
         assert prompt.payload["target_user"] == "root"
         assert prompt.payload["target_port"] == 22
+        assert prompt.payload["auth_mode"] == "key-based"
+        assert prompt.payload["credential_guidance"] == "Set JULES_SSH_PASSWORD"
 
 
 # ---------------------------------------------------------------------------

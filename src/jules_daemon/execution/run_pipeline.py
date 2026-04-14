@@ -46,6 +46,7 @@ import paramiko
 from jules_daemon.ssh.credentials import (
     REDACTED,
     SSHCredential,
+    build_missing_password_guidance,
     resolve_ssh_credentials,
 )
 from jules_daemon.ssh.errors import SSHAuthenticationError, SSHConnectionError
@@ -442,6 +443,11 @@ async def execute_run(
     except (SSHAuthenticationError, SSHConnectionError) as exc:
         end_time = _now_utc()
         error_msg = str(exc)
+        if credential is None and isinstance(exc, SSHAuthenticationError):
+            error_msg = (
+                f"{error_msg}\n"
+                f"Hint: {build_missing_password_guidance()}"
+            )
         logger.warning("SSH execution failed for run %s: %s", run_id, error_msg)
 
         # Update wiki to FAILED

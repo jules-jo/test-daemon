@@ -146,6 +146,11 @@ class TestRenderConfirmPrompt:
                 "target_host": "staging.example.com",
                 "target_user": "deploy",
                 "target_port": 2222,
+                "auth_mode": "key-based",
+                "credential_guidance": (
+                    "No stored SSH password was found. "
+                    "Set JULES_SSH_PASSWORD."
+                ),
                 "risk_level": "HIGH",
                 "explanation": "Runs the full test suite",
             },
@@ -157,6 +162,8 @@ class TestRenderConfirmPrompt:
         assert "IP:          10.0.0.10" in result
         assert "Target:      deploy@staging.example.com:2222" in result
         assert "Tutorial box for smoke-test runs" in result
+        assert "Auth:        key-based (no stored password found)" in result
+        assert "Set JULES_SSH_PASSWORD" in result
         assert "cd /app && pytest -v tests/" in result
         assert "HIGH" in result
         assert "Runs the full test suite" in result
@@ -187,6 +194,22 @@ class TestRenderConfirmPrompt:
         # No "Explanation:" line when explanation is empty
         assert "make test" in result
         assert "Target:      root@ci:22" in result
+
+    def test_password_auth_shows_source_without_hint(self):
+        envelope = _make_envelope(
+            MessageType.CONFIRM_PROMPT,
+            {
+                "command": "make test",
+                "target_host": "10.0.0.10",
+                "target_user": "root",
+                "target_port": 22,
+                "auth_mode": "password",
+                "credential_source": "credentials_file:/home/me/.jules/ssh_credentials.yaml",
+            },
+        )
+        result = render_confirm_prompt(envelope)
+        assert "Auth:        credentials_file:/home/me/.jules/ssh_credentials.yaml" in result
+        assert "Hint:" not in result
 
 
 # ---------------------------------------------------------------------------

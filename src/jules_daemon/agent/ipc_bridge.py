@@ -164,6 +164,9 @@ def make_confirm_callback(
             ("resolved_system_hostname", "system_hostname"),
             ("resolved_system_ip_address", "system_ip_address"),
             ("resolved_system_description", "system_description"),
+            ("auth_mode", "auth_mode"),
+            ("credential_source", "credential_source"),
+            ("credential_guidance", "credential_guidance"),
         ):
             value = context.get(source_key)
             if isinstance(value, str) and value.strip():

@@ -15,7 +15,7 @@ import asyncio
 import contextlib
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1308,6 +1308,8 @@ class TestRequestHandlerRunVerb:
         assert prompt.payload["target_host"] == "10.0.0.10"
         assert prompt.payload["target_user"] == "root"
         assert prompt.payload["system_name"] == "tuto"
+        assert prompt.payload["auth_mode"] == "key-based"
+        assert "JULES_SSH_PASSWORD" in prompt.payload["credential_guidance"]
 
     @pytest.mark.asyncio
     async def test_run_with_named_system_includes_optional_prompt_metadata(
@@ -1360,6 +1362,46 @@ class TestRequestHandlerRunVerb:
         assert prompt.payload["system_hostname"] == "tuto.internal.example"
         assert prompt.payload["system_ip_address"] == "10.0.0.10"
         assert prompt.payload["system_description"] == "Tutorial box for smoke-test runs."
+
+    @pytest.mark.asyncio
+    async def test_run_with_stored_password_shows_credential_source(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+        client = _make_client()
+
+        deny_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="deny-password-001",
+            timestamp="2026-04-09T12:00:01Z",
+            payload={"approved": False},
+        )
+        deny_frame = encode_frame(deny_reply)
+        client.reader.readexactly = AsyncMock(
+            side_effect=[deny_frame[:4], deny_frame[4:]]
+        )
+
+        with patch(
+            "jules_daemon.ipc.request_handler.resolve_ssh_credentials",
+            return_value=MagicMock(source="credentials_file:/tmp/creds.yaml"),
+        ):
+            envelope = _make_request(payload={
+                "verb": "run",
+                "target_host": "10.0.0.10",
+                "target_user": "root",
+                "natural_language": "run smoke tests",
+            })
+
+            response = await handler.handle_message(envelope, client)
+
+        assert response.msg_type == MessageType.RESPONSE
+        prompt_bytes = b"".join(call.args[0] for call in client.writer.write.call_args_list)
+        prompt_length = unpack_header(prompt_bytes[:HEADER_SIZE])
+        prompt = decode_envelope(prompt_bytes[HEADER_SIZE:HEADER_SIZE + prompt_length])
+        assert prompt.payload["auth_mode"] == "password"
+        assert prompt.payload["credential_source"] == "credentials_file:/tmp/creds.yaml"
 
     @pytest.mark.asyncio
     async def test_run_with_unknown_system_returns_error(

@@ -137,7 +137,10 @@ from jules_daemon.protocol.notifications import (
     UnsubscribeResponse,
     create_notification_envelope,
 )
-from jules_daemon.ssh.credentials import resolve_ssh_credentials
+from jules_daemon.ssh.credentials import (
+    build_missing_password_guidance,
+    resolve_ssh_credentials,
+)
 from jules_daemon.wiki import current_run as current_run_io
 from jules_daemon.wiki.command_queue import CommandQueue
 from jules_daemon.execution.test_discovery import (
@@ -1247,6 +1250,15 @@ class RequestHandler:
             "target_user": target_user,
             "target_port": target_port,
         }
+        credential = resolve_ssh_credentials(target_host)
+        if credential is None:
+            payload["auth_mode"] = "key-based"
+            payload["credential_guidance"] = build_missing_password_guidance()
+        else:
+            payload["auth_mode"] = "password"
+            source = getattr(credential, "source", "")
+            if isinstance(source, str) and source.strip():
+                payload["credential_source"] = source
         system_name = parsed.get("resolved_system_name")
         if isinstance(system_name, str) and system_name.strip():
             payload["system_name"] = system_name.strip()
