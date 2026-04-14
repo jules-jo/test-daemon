@@ -2067,7 +2067,7 @@ class TestRequestHandlerDiscoverVerb:
     """Tests for discover verb handling."""
 
     @pytest.mark.asyncio
-    async def test_discover_python_script_prompt_uses_python3(
+    async def test_discover_python_script_prompt_shows_python_then_python3_fallback(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2131,7 +2131,10 @@ class TestRequestHandlerDiscoverVerb:
             prompt_frame[HEADER_SIZE:HEADER_SIZE + prompt_length]
         )
         assert prompt.msg_type == MessageType.CONFIRM_PROMPT
-        assert prompt.payload["proposed_command"] == "python3 /root/step.py -h"
+        assert prompt.payload["proposed_command"] == (
+            "python /root/step.py -h (fallback: python3 /root/step.py -h)"
+        )
+        assert "python /root/step.py -h" in prompt.payload["message"]
         assert "python3 /root/step.py -h" in prompt.payload["message"]
 
 

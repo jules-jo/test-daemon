@@ -46,9 +46,11 @@ from jules_daemon.wiki.test_knowledge import KNOWLEDGE_DIR, derive_test_slug
 __all__ = [
     "DiscoveredTestSpec",
     "build_discovery_help_command",
+    "build_discovery_help_commands",
     "discover_test",
     "format_spec_preview",
     "normalize_discovery_command",
+    "resolve_discovery_command_candidates",
     "save_discovered_spec",
 ]
 
@@ -125,43 +127,80 @@ class DiscoveredTestSpec:
     __test__ = False
 
 
+@dataclass(frozen=True)
+class _HelpProbeResult:
+    """Captured help text plus the base command that produced it."""
+
+    help_text: str
+    executed_command: str
+
+
 def normalize_discovery_command(command: str) -> str:
     """Normalize a discover command before probing with ``-h``.
 
-    If the command starts with a bare Python script path such as
-    ``/root/test.py`` or ``./test.py``, prefix it with ``python3`` so the
-    remote probe executes the script correctly. Commands that already start
-    with a Python interpreter are left unchanged.
+    Legacy compatibility helper.
+
+    For bare Python script paths, returns the first preferred interpreter
+    candidate. The actual discovery path may try additional candidates.
+    """
+    candidates = resolve_discovery_command_candidates(command)
+    return candidates[0] if candidates else command.strip()
+
+
+def resolve_discovery_command_candidates(command: str) -> tuple[str, ...]:
+    """Return ordered base-command candidates for test discovery.
+
+    Bare ``.py`` script paths try ``python`` first, then ``python3``.
+    Commands that already include an interpreter or are not Python scripts
+    keep their original form only.
     """
     raw = command.strip()
     if not raw:
-        return raw
+        return ()
 
     try:
         tokens = shlex.split(raw, posix=True)
     except ValueError:
-        return raw
+        return (raw,)
 
     if not tokens:
-        return raw
+        return ()
 
     first = tokens[0]
     first_name = Path(first).name.lower()
     if first_name in _PYTHON_INTERPRETER_NAMES:
-        return raw
+        return (raw,)
 
     if first.lower().endswith((".py", ".pyw")):
-        return f"python3 {raw}"
+        return (f"python {raw}", f"python3 {raw}")
 
-    return raw
+    return (raw,)
 
 
 def build_discovery_help_command(command: str, *, flag: str = "-h") -> str:
-    """Build the actual remote help probe command for discovery."""
-    normalized = normalize_discovery_command(command)
-    if not normalized:
-        return normalized
-    return f"{normalized} {flag}"
+    """Build the first remote help probe command for discovery."""
+    commands = build_discovery_help_commands(command, flag=flag)
+    return commands[0] if commands else command.strip()
+
+
+def build_discovery_help_commands(command: str, *, flag: str = "-h") -> tuple[str, ...]:
+    """Build all remote help probe commands for discovery."""
+    return tuple(
+        f"{candidate} {flag}"
+        for candidate in resolve_discovery_command_candidates(command)
+    )
+
+
+def _looks_like_help_output(text: str) -> bool:
+    """Best-effort check for actual help/usage text."""
+    lowered = text.lower()
+    return (
+        "usage:" in lowered
+        or "\nusage:" in lowered
+        or "options:" in lowered
+        or "--help" in lowered
+        or "optional arguments" in lowered
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -241,48 +280,77 @@ async def _fetch_help_text(
     username: str,
     credential: SSHCredential | None,
     command: str,
-) -> str | None:
+) -> _HelpProbeResult | None:
     """Run ``command -h``, falling back to ``command --help``.
 
-    Returns the combined stdout+stderr, or None on failure.
+    Returns the combined stdout+stderr plus the base command that produced it,
+    or None on connection/auth failure.
     """
-    normalized_command = normalize_discovery_command(command)
+    last_combined = ""
+    last_candidate = ""
+    candidates = resolve_discovery_command_candidates(command)
 
-    for flag in ("-h", "--help"):
-        full_cmd = build_discovery_help_command(normalized_command, flag=flag)
-        logger.info("Running help command: %s@%s: %s", username, host, full_cmd)
-        try:
-            exit_code, stdout, stderr = await asyncio.to_thread(
-                _run_help_via_paramiko,
-                host=host,
-                port=port,
-                username=username,
-                credential=credential,
-                command=full_cmd,
-            )
-        except (SSHAuthenticationError, SSHConnectionError) as exc:
-            logger.warning("SSH failed while fetching help: %s", exc)
-            return None
-        except Exception as exc:
-            logger.warning("Unexpected error fetching help: %s", exc)
-            return None
+    for candidate in candidates:
+        candidate_help: _HelpProbeResult | None = None
 
-        combined = (stdout + "\n" + stderr).strip()
-        if exit_code == 0 and combined:
-            return combined
+        for flag in ("-h", "--help"):
+            full_cmd = f"{candidate} {flag}"
+            logger.info("Running help command: %s@%s: %s", username, host, full_cmd)
+            try:
+                exit_code, stdout, stderr = await asyncio.to_thread(
+                    _run_help_via_paramiko,
+                    host=host,
+                    port=port,
+                    username=username,
+                    credential=credential,
+                    command=full_cmd,
+                )
+            except (SSHAuthenticationError, SSHConnectionError) as exc:
+                logger.warning("SSH failed while fetching help: %s", exc)
+                return None
+            except Exception as exc:
+                logger.warning("Unexpected error fetching help: %s", exc)
+                return None
 
-        # Some tools write help to stderr even on success, or exit non-zero
-        # for -h but zero for --help. Try the next flag.
-        if combined:
+            combined = (stdout + "\n" + stderr).strip()
+            if combined:
+                last_combined = combined
+                last_candidate = candidate
+
+            if exit_code == 0 and combined:
+                return _HelpProbeResult(
+                    help_text=combined,
+                    executed_command=candidate,
+                )
+
+            if combined and _looks_like_help_output(combined):
+                candidate_help = _HelpProbeResult(
+                    help_text=combined,
+                    executed_command=candidate,
+                )
+                logger.debug(
+                    "Using non-zero help output from %s (flag=%s, exit=%d)",
+                    candidate,
+                    flag,
+                    exit_code,
+                )
+                break
+
+        if candidate_help is not None:
+            return candidate_help
+
+        if len(candidates) > 1:
             logger.debug(
-                "Flag %s returned exit_code=%d, trying next flag",
-                flag,
-                exit_code,
+                "Discovery candidate failed without usable help output, "
+                "trying next candidate: %s",
+                candidate,
             )
-            # If this was -h and it gave output, keep it as a candidate
-            if flag == "--help" or exit_code != 0:
-                # --help also failed or -h gave non-zero; use whatever we got
-                return combined
+
+    if last_combined:
+        return _HelpProbeResult(
+            help_text=last_combined,
+            executed_command=last_candidate or command.strip(),
+        )
 
     return None
 
@@ -408,7 +476,7 @@ async def discover_test(
         DiscoveredTestSpec on success, None if SSH fails entirely.
     """
     credential = resolve_ssh_credentials(host)
-    help_text = await _fetch_help_text(
+    help_result = await _fetch_help_text(
         host=host,
         port=port,
         username=user,
@@ -417,16 +485,18 @@ async def discover_test(
     )
     normalized_command = normalize_discovery_command(command)
 
-    if help_text is None:
+    if help_result is None:
         logger.warning("Could not fetch help text for %s on %s", command, host)
         return None
+    help_text = help_result.help_text
+    effective_command = help_result.executed_command or normalized_command
 
     # Try LLM parsing if available
     if llm_client is not None and llm_config is not None:
         spec = await _parse_help_with_llm(help_text, llm_client, llm_config)
         if spec is not None:
             normalized_template = normalize_discovery_command(
-                spec.command_template or normalized_command
+                spec.command_template or effective_command
             )
             if normalized_template != spec.command_template:
                 spec = replace(spec, command_template=normalized_template)
@@ -435,7 +505,7 @@ async def discover_test(
 
     # Fallback: return raw spec without structured extraction
     return DiscoveredTestSpec(
-        command_template=normalized_command,
+        command_template=effective_command,
         required_args=(),
         optional_args=(),
         arg_descriptions={},

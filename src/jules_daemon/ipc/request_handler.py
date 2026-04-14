@@ -146,6 +146,7 @@ from jules_daemon.wiki.command_queue import CommandQueue
 from jules_daemon.execution.test_discovery import (
     DiscoveredTestSpec,
     build_discovery_help_command,
+    build_discovery_help_commands,
     discover_test,
     format_spec_preview,
     save_discovered_spec,
@@ -2007,18 +2008,25 @@ class RequestHandler:
             logger.debug("Failed to check existing spec: %s", exc)
 
         # Step 1: Ask permission to run -h on the remote host
-        help_command = build_discovery_help_command(command)
+        help_commands = build_discovery_help_commands(command)
+        help_command = help_commands[0] if help_commands else build_discovery_help_command(command)
+        help_command_display = help_command
+        if len(help_commands) > 1:
+            fallback_display = ", ".join(help_commands[1:])
+            help_command_display = (
+                f"{help_command} (fallback: {fallback_display})"
+            )
         pre_confirm_id = f"discover-pre-{uuid.uuid4().hex[:12]}"
         pre_confirm = MessageEnvelope(
             msg_type=MessageType.CONFIRM_PROMPT,
             msg_id=pre_confirm_id,
             timestamp=_now_iso(),
             payload={
-                "proposed_command": help_command,
+                "proposed_command": help_command_display,
                 "target_host": target_host,
                 "target_user": target_user,
                 "message": (
-                    f"Will run '{help_command}' on "
+                    f"Will run '{help_command_display}' on "
                     f"{target_user}@{target_host}:{target_port} "
                     f"to discover test arguments."
                 ),
@@ -2056,7 +2064,7 @@ class RequestHandler:
             timestamp=_now_iso(),
             payload={
                 "line": (
-                    f"\nRunning '{help_command}' on "
+                    f"\nRunning '{help_command_display}' on "
                     f"{target_user}@{target_host}...\n"
                 ),
                 "is_end": False,

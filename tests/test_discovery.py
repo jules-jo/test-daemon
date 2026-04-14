@@ -25,8 +25,10 @@ from jules_daemon.execution.test_discovery import (
     DiscoveredTestSpec,
     _parse_llm_response,
     build_discovery_help_command,
+    build_discovery_help_commands,
     format_spec_preview,
     normalize_discovery_command,
+    resolve_discovery_command_candidates,
     save_discovered_spec,
 )
 from jules_daemon.ipc.framing import MessageEnvelope, MessageType
@@ -91,10 +93,10 @@ class TestDiscoveredTestSpec:
 class TestDiscoveryCommandNormalization:
     """Tests for discovery command normalization helpers."""
 
-    def test_normalize_bare_python_script_prefixes_python3(self) -> None:
+    def test_normalize_bare_python_script_prefers_python(self) -> None:
         assert (
             normalize_discovery_command("/root/step.py")
-            == "python3 /root/step.py"
+            == "python /root/step.py"
         )
 
     def test_normalize_python_command_is_unchanged(self) -> None:
@@ -103,10 +105,22 @@ class TestDiscoveryCommandNormalization:
             == "python3 /root/step.py --flag"
         )
 
-    def test_build_help_command_uses_normalized_python_invocation(self) -> None:
+    def test_resolve_python_script_candidates_in_order(self) -> None:
+        assert resolve_discovery_command_candidates("/root/step.py") == (
+            "python /root/step.py",
+            "python3 /root/step.py",
+        )
+
+    def test_build_help_command_uses_first_python_candidate(self) -> None:
         assert (
             build_discovery_help_command("/root/step.py")
-            == "python3 /root/step.py -h"
+            == "python /root/step.py -h"
+        )
+
+    def test_build_help_commands_includes_python_fallback(self) -> None:
+        assert build_discovery_help_commands("/root/step.py") == (
+            "python /root/step.py -h",
+            "python3 /root/step.py -h",
         )
 
 
@@ -504,14 +518,20 @@ class TestDiscoverTestAsync:
 
     @pytest.mark.asyncio
     async def test_returns_raw_spec_without_llm(self) -> None:
-        from jules_daemon.execution.test_discovery import discover_test
+        from jules_daemon.execution.test_discovery import (
+            _HelpProbeResult,
+            discover_test,
+        )
 
         with patch(
             "jules_daemon.execution.test_discovery.resolve_ssh_credentials",
             return_value=None,
         ), patch(
             "jules_daemon.execution.test_discovery._fetch_help_text",
-            return_value="usage: test.py [-h] -n NAME",
+            return_value=_HelpProbeResult(
+                help_text="usage: test.py [-h] -n NAME",
+                executed_command="python3 test.py",
+            ),
         ):
             result = await discover_test(
                 host="10.0.0.1",
@@ -525,14 +545,20 @@ class TestDiscoverTestAsync:
 
     @pytest.mark.asyncio
     async def test_returns_raw_spec_with_normalized_python_script_command(self) -> None:
-        from jules_daemon.execution.test_discovery import discover_test
+        from jules_daemon.execution.test_discovery import (
+            _HelpProbeResult,
+            discover_test,
+        )
 
         with patch(
             "jules_daemon.execution.test_discovery.resolve_ssh_credentials",
             return_value=None,
         ), patch(
             "jules_daemon.execution.test_discovery._fetch_help_text",
-            return_value="usage: step.py [-h] --name NAME",
+            return_value=_HelpProbeResult(
+                help_text="usage: step.py [-h] --name NAME",
+                executed_command="python /root/step.py",
+            ),
         ):
             result = await discover_test(
                 host="10.0.0.1",
@@ -540,11 +566,14 @@ class TestDiscoverTestAsync:
                 command="/root/step.py",
             )
             assert result is not None
-            assert result.command_template == "python3 /root/step.py"
+            assert result.command_template == "python /root/step.py"
 
     @pytest.mark.asyncio
     async def test_normalizes_llm_parsed_python_script_template(self) -> None:
-        from jules_daemon.execution.test_discovery import discover_test
+        from jules_daemon.execution.test_discovery import (
+            _HelpProbeResult,
+            discover_test,
+        )
 
         parsed_spec = DiscoveredTestSpec(
             command_template="/root/step.py --name {name}",
@@ -560,7 +589,10 @@ class TestDiscoverTestAsync:
             return_value=None,
         ), patch(
             "jules_daemon.execution.test_discovery._fetch_help_text",
-            return_value="usage: step.py [-h] --name NAME",
+            return_value=_HelpProbeResult(
+                help_text="usage: step.py [-h] --name NAME",
+                executed_command="python /root/step.py",
+            ),
         ), patch(
             "jules_daemon.execution.test_discovery._parse_help_with_llm",
             AsyncMock(return_value=parsed_spec),
@@ -573,4 +605,34 @@ class TestDiscoverTestAsync:
                 llm_config=MagicMock(),
             )
             assert result is not None
-            assert result.command_template == "python3 /root/step.py --name {name}"
+            assert result.command_template == "python /root/step.py --name {name}"
+
+    @pytest.mark.asyncio
+    async def test_fetch_help_text_falls_back_from_python_to_python3(self) -> None:
+        from jules_daemon.execution.test_discovery import _fetch_help_text
+
+        with patch(
+            "jules_daemon.execution.test_discovery._run_help_via_paramiko",
+            side_effect=[
+                (127, "", "python: command not found"),
+                (127, "", "python: command not found"),
+                (0, "usage: step.py [-h] --name NAME", ""),
+            ],
+        ) as mock_run:
+            result = await _fetch_help_text(
+                host="10.0.0.1",
+                port=22,
+                username="root",
+                credential=None,
+                command="/root/step.py",
+            )
+
+        assert result is not None
+        assert result.executed_command == "python3 /root/step.py"
+        assert result.help_text == "usage: step.py [-h] --name NAME"
+        commands = [call.kwargs["command"] for call in mock_run.call_args_list]
+        assert commands == [
+            "python /root/step.py -h",
+            "python /root/step.py --help",
+            "python3 /root/step.py -h",
+        ]
