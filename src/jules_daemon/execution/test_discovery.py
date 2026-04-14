@@ -654,6 +654,7 @@ def save_discovered_spec(
         "type": _WIKI_TYPE,
         "name": raw_name,
         "test_slug": slug,
+        "command_pattern": spec.command_template,
         "command_template": spec.command_template,
         "required_args": list(spec.required_args),
         "optional_args": list(spec.optional_args),

@@ -231,6 +231,7 @@ class TestSaveDiscoveredSpec:
         content = result_path.read_text(encoding="utf-8")
         assert "type: test-spec" in content
         assert "discovered_from_host: myhost" in content
+        assert "command_pattern: python3 test.py -n {name}" in content
 
     def test_no_temp_file_left(self, tmp_path: Path) -> None:
         spec = DiscoveredTestSpec(

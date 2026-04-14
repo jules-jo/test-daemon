@@ -516,7 +516,11 @@ def _frontmatter_to_knowledge(fm: dict[str, Any]) -> TestKnowledge:
     file (one that a human edited by hand) still loads cleanly.
     """
     test_slug = _coerce_string(fm.get("test_slug")) or "unknown-test"
-    command_pattern = _coerce_string(fm.get("command_pattern")) or test_slug
+    command_pattern = (
+        _coerce_string(fm.get("command_pattern"))
+        or _coerce_string(fm.get("command_template"))
+        or test_slug
+    )
     return TestKnowledge(
         test_slug=test_slug,
         command_pattern=command_pattern,

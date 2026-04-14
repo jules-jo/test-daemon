@@ -692,6 +692,71 @@ class TestMultipleSpecs:
         assert data1["test_slug"] == data2["test_slug"]
         assert data1["command_pattern"] == data2["command_pattern"]
 
+    @pytest.mark.asyncio
+    async def test_prefers_specific_name_over_generic_test_token(
+        self, wiki_root: Path
+    ) -> None:
+        """A query like 'run the step test' should resolve the 'step' spec."""
+        _save_knowledge(
+            wiki_root,
+            slug="step-py",
+            command="python3 /root/step.py --target {target}",
+            purpose="Step test",
+            required_args=("target",),
+        )
+        _save_knowledge(
+            wiki_root,
+            slug="agent-test-py",
+            command="python3 ~/agent_test.py --iterations {iterations} --host {host}",
+            purpose="Agent loop test",
+            required_args=("iterations", "host", "timeout"),
+        )
+
+        tool = LookupTestSpecTool(wiki_root=wiki_root)
+
+        result = await tool.execute(
+            call_id="specific1",
+            args={"test_name": "run the step test"},
+        )
+
+        data = json.loads(result.output)
+        assert data["found"] is True
+        assert data["test_slug"] == "step-py"
+        assert data["required_args"] == ["target"]
+        assert data["command_pattern"] == "python3 /root/step.py --target {target}"
+
+    @pytest.mark.asyncio
+    async def test_loads_discovered_spec_command_template_as_command_pattern(
+        self, wiki_root: Path
+    ) -> None:
+        """Discovery pages with command_template should still load cleanly."""
+        file_path = wiki_root / "pages" / "daemon" / "knowledge" / "test-step-py.md"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(
+            "---\n"
+            "type: test-spec\n"
+            "name: step\n"
+            "test_slug: step-py\n"
+            "command_template: python3 /root/step.py --target {target}\n"
+            "required_args:\n"
+            "  - target\n"
+            "---\n"
+            "# Step\n",
+            encoding="utf-8",
+        )
+
+        tool = LookupTestSpecTool(wiki_root=wiki_root)
+        result = await tool.execute(
+            call_id="specific2",
+            args={"test_name": "step"},
+        )
+
+        data = json.loads(result.output)
+        assert data["found"] is True
+        assert data["test_slug"] == "step-py"
+        assert data["command_pattern"] == "python3 /root/step.py --target {target}"
+        assert data["required_args"] == ["target"]
+
 
 # ---------------------------------------------------------------------------
 # JSON output structure conformance
