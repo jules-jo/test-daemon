@@ -237,6 +237,15 @@ class TestSSHTargetExtraction:
         assert result.extracted_args.get("natural_language") == raw
         assert "system_name" not in result.extracted_args
 
+    def test_implicit_system_alias_with_following_arguments_sets_infer_target_hint(
+        self,
+    ) -> None:
+        raw = "run the smoke tests in tuto. 1 iteration"
+        result = extract_from_natural_language(raw)
+        assert result.extracted_args.get("infer_target") is True
+        assert result.extracted_args.get("natural_language") == raw
+        assert "system_name" not in result.extracted_args
+
 
 class TestNLExtractionDataclass:
     """Tests for the NLExtraction dataclass itself."""

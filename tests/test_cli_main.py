@@ -87,3 +87,12 @@ class TestResolveInput:
         assert result.parts == ("run", "--infer-target", raw)
         assert result.hint == "(interpreted as 'run')"
         assert result.error is None
+
+    def test_run_sentence_with_implicit_system_alias_and_following_args_uses_infer_target(
+        self,
+    ) -> None:
+        raw = "run the smoke tests in tuto. 1 iteration"
+        result = _resolve_input(raw, allow_prompt=False)
+        assert result.parts == ("run", "--infer-target", raw)
+        assert result.hint == "(interpreted as 'run')"
+        assert result.error is None

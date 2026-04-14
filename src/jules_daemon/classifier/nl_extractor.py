@@ -180,7 +180,7 @@ _SYSTEM_NAME_RE: re.Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 _IMPLICIT_SYSTEM_NAME_RE: re.Pattern[str] = re.compile(
-    r"\b(?:in|on|at)\s+([a-zA-Z0-9_.-]+)(?:[?.!,;:]*)\s*$",
+    r"\b(?:in|on|at)\s+([a-zA-Z0-9_.-]+)\b",
     re.IGNORECASE,
 )
 
@@ -259,10 +259,11 @@ def _extract_system_name(raw: str) -> dict[str, Any]:
 
 
 def _extract_infer_target_hint(raw: str) -> dict[str, Any]:
-    """Mark NL requests that likely end with a named-system reference.
+    """Mark NL requests that likely contain a named-system reference.
 
     This does not guess the system locally. It simply tells the daemon to
     try resolving a system mention like ``in tuto`` against its live wiki.
+    The actual resolution remains daemon-side against known system aliases.
     """
     if _SYSTEM_NAME_RE.search(raw):
         return {}

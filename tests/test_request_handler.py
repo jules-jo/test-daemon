@@ -1422,6 +1422,39 @@ class TestRequestHandlerRunVerb:
         assert resolved["natural_language"] == "run smoke tests"
         assert resolved["original_natural_language"] == "run smoke tests in tuto"
 
+    def test_infer_named_system_preserves_following_args_after_alias(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        systems_dir = tmp_path / "pages" / "systems"
+        systems_dir.mkdir(parents=True, exist_ok=True)
+        (systems_dir / "tutorial-box.md").write_text(
+            "---\n"
+            "type: system-info\n"
+            "system_name: tutorial-box\n"
+            "aliases:\n"
+            "  - tuto\n"
+            "host: 10.0.0.10\n"
+            "user: root\n"
+            "---\n\n"
+            "# Tutorial Box\n",
+            encoding="utf-8",
+        )
+
+        handler = RequestHandler(config=RequestHandlerConfig(wiki_root=tmp_path))
+        resolved = handler._infer_named_system_from_request({
+            "infer_target": True,
+            "natural_language": "run smoke tests in tuto. 1 iteration",
+        })
+
+        assert isinstance(resolved, dict)
+        assert resolved["resolved_system_name"] == "tutorial-box"
+        assert resolved["natural_language"] == "run smoke tests. 1 iteration"
+        assert (
+            resolved["original_natural_language"]
+            == "run smoke tests in tuto. 1 iteration"
+        )
+
     @pytest.mark.asyncio
     async def test_run_with_named_system_includes_optional_prompt_metadata(
         self,
