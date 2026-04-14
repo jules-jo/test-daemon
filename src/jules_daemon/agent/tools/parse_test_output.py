@@ -195,6 +195,7 @@ class ParseTestOutputTool(BaseTool):
                 ),
                 json_type="array",
                 required=False,
+                items={"type": "string"},
             ),
         ),
         approval=ApprovalRequirement.NONE,

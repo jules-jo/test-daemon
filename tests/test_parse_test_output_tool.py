@@ -751,6 +751,10 @@ class TestOpenAISchema:
         assert "raw_output" in params["properties"]
         assert "framework_hint" in params["properties"]
         assert "summary_fields" in params["properties"]
+        assert params["properties"]["summary_fields"]["type"] == "array"
+        assert params["properties"]["summary_fields"]["items"] == {
+            "type": "string"
+        }
 
 
 # ---------------------------------------------------------------------------

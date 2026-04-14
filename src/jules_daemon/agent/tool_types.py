@@ -150,6 +150,9 @@ class ToolParam:
             meaningful when ``required`` is False.
         enum: Optional tuple of allowed values. Serialized as a JSON
             Schema ``enum`` array.
+        items: Optional JSON Schema fragment for array element validation.
+            Required when ``json_type`` is ``"array"`` because strict
+            function-calling APIs reject array schemas without ``items``.
     """
 
     name: str
@@ -158,6 +161,7 @@ class ToolParam:
     required: bool = True
     default: Any = None
     enum: tuple[str, ...] | None = None
+    items: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.name or not self.name.strip():
@@ -169,6 +173,24 @@ class ToolParam:
                 f"json_type must be one of {sorted(_VALID_JSON_TYPES)}, "
                 f"got {self.json_type!r}"
             )
+        if self.json_type == "array":
+            if self.items is None:
+                raise ValueError(
+                    "array parameters must define an items schema"
+                )
+            if not isinstance(self.items, dict) or not self.items:
+                raise ValueError(
+                    "items must be a non-empty JSON schema object"
+                )
+            item_type = self.items.get("type")
+            if item_type is not None and item_type not in _VALID_JSON_TYPES:
+                raise ValueError(
+                    f"items.type must be one of {sorted(_VALID_JSON_TYPES)}, "
+                    f"got {item_type!r}"
+                )
+            object.__setattr__(self, "items", dict(self.items))
+        elif self.items is not None:
+            raise ValueError("items is only valid for array parameters")
 
     def to_json_schema(self) -> dict[str, Any]:
         """Serialize this parameter to a JSON Schema property definition.
@@ -185,6 +207,8 @@ class ToolParam:
             schema["enum"] = list(self.enum)
         if self.default is not None:
             schema["default"] = self.default
+        if self.items is not None:
+            schema["items"] = dict(self.items)
         return schema
 
 

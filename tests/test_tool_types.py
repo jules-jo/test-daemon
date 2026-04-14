@@ -69,6 +69,16 @@ class TestToolParam:
         )
         assert param.enum == ("debug", "info", "warning", "error")
 
+    def test_create_array_with_items(self) -> None:
+        param = ToolParam(
+            name="summary_fields",
+            description="Ordered summary fields",
+            json_type="array",
+            required=False,
+            items={"type": "string"},
+        )
+        assert param.items == {"type": "string"}
+
     def test_frozen(self) -> None:
         param = ToolParam(name="x", description="d", json_type="string")
         with pytest.raises(FrozenInstanceError):
@@ -89,6 +99,27 @@ class TestToolParam:
     def test_invalid_json_type_rejected(self) -> None:
         with pytest.raises(ValueError, match="json_type must be one of"):
             ToolParam(name="x", description="d", json_type="float")
+
+    def test_array_without_items_rejected(self) -> None:
+        with pytest.raises(
+            ValueError, match="array parameters must define an items schema"
+        ):
+            ToolParam(
+                name="summary_fields",
+                description="Ordered summary fields",
+                json_type="array",
+            )
+
+    def test_non_array_with_items_rejected(self) -> None:
+        with pytest.raises(
+            ValueError, match="items is only valid for array parameters"
+        ):
+            ToolParam(
+                name="host",
+                description="Target host",
+                json_type="string",
+                items={"type": "string"},
+            )
 
     def test_to_json_schema_string(self) -> None:
         param = ToolParam(name="host", description="Target host", json_type="string")
@@ -119,6 +150,21 @@ class TestToolParam:
         )
         schema = param.to_json_schema()
         assert schema["default"] == 300
+
+    def test_to_json_schema_array_includes_items(self) -> None:
+        param = ToolParam(
+            name="summary_fields",
+            description="Ordered summary fields",
+            json_type="array",
+            required=False,
+            items={"type": "string"},
+        )
+        schema = param.to_json_schema()
+        assert schema == {
+            "type": "array",
+            "description": "Ordered summary fields",
+            "items": {"type": "string"},
+        }
 
 
 # ---------------------------------------------------------------------------
