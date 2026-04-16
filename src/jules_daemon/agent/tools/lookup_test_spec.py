@@ -102,9 +102,10 @@ class LookupTestSpecTool(InfoRetrievalTool):
             "Look up a test specification from the wiki test catalog. "
             "Returns the test's command pattern, purpose, output format, "
             "summary fields, common failures, normal behavior, required "
-            "arguments, and run count. Use this to understand what a "
-            "test does and what arguments it needs before proposing an "
-            "SSH command."
+            "arguments, workflow prerequisites, artifact requirements, "
+            "and run count. Use this to understand what a test does, "
+            "what arguments it needs, and whether it has prerequisite "
+            "workflow steps before proposing an SSH command."
         )
 
     @property
@@ -359,5 +360,11 @@ class LookupTestSpecTool(InfoRetrievalTool):
             "common_failures": list(knowledge.common_failures),
             "normal_behavior": knowledge.normal_behavior,
             "required_args": list(knowledge.required_args),
+            "workflow_steps": list(knowledge.workflow_steps),
+            "prerequisites": list(knowledge.prerequisites),
+            "artifact_requirements": list(knowledge.artifact_requirements),
+            "when_missing_artifact_ask": knowledge.when_missing_artifact_ask,
+            "success_criteria": knowledge.success_criteria,
+            "failure_criteria": knowledge.failure_criteria,
             "runs_observed": knowledge.runs_observed,
         }

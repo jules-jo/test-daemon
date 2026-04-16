@@ -3849,6 +3849,22 @@ class RequestHandler:
             context["normal_behavior"] = knowledge.normal_behavior
         if knowledge.required_args:
             context["required_args"] = list(knowledge.required_args)
+        if knowledge.workflow_steps:
+            context["workflow_steps"] = list(knowledge.workflow_steps)
+        if knowledge.prerequisites:
+            context["prerequisites"] = list(knowledge.prerequisites)
+        if knowledge.artifact_requirements:
+            context["artifact_requirements"] = list(
+                knowledge.artifact_requirements
+            )
+        if knowledge.when_missing_artifact_ask:
+            context["when_missing_artifact_ask"] = (
+                knowledge.when_missing_artifact_ask
+            )
+        if knowledge.success_criteria:
+            context["success_criteria"] = knowledge.success_criteria
+        if knowledge.failure_criteria:
+            context["failure_criteria"] = knowledge.failure_criteria
         if knowledge.common_failures:
             context["common_failures"] = list(knowledge.common_failures[:3])
         return context

@@ -76,6 +76,7 @@ The main daemon lifecycle starts in `src/jules_daemon/__main__.py`. It initializ
 - Current request interpretation is still front-door-heavy in the CLI. A planned design direction is to keep only a thin deterministic front door and move unresolved conversational run interpretation deeper into the daemon/agent loop while preserving deterministic target validation and approval enforcement.
 - A newer design direction is to model multi-step test workflows explicitly, so Jules can reason about prerequisites such as calibration, answer status queries mid-run, and summarize composite workflows rather than only single commands.
 - That workflow direction now has a concrete implementation-plan page describing the proposed records, services, tool primitives, and staged rollout for generic multi-step test execution.
+- The current codebase now also supports workflow-aware test-knowledge fields such as `workflow_steps`, `prerequisites`, `artifact_requirements`, and `when_missing_artifact_ask`, plus a first deterministic planner/preflight layer under `src/jules_daemon/workflows/planner.py`.
 
 ## Current Snapshot
 
@@ -99,3 +100,4 @@ The main daemon lifecycle starts in `src/jules_daemon/__main__.py`. It initializ
 - [Stateful Test Workflow Orchestration](stateful-test-workflow-orchestration.md)
 - [Stateful Test Workflow Implementation Plan](stateful-test-workflow-implementation-plan.md)
 - [Project Wiki System](../concepts/project-wiki-system.md)
+- [Workflow-Aware Test Knowledge Schema](../concepts/workflow-aware-test-knowledge-schema.md)

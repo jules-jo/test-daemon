@@ -318,6 +318,12 @@ class TestRequestHandlerStatusVerb:
                 summary_fields=("passed", "failed", "incomplete"),
                 normal_behavior="Tests emit PASSED/FAILED markers",
                 required_args=("env",),
+                workflow_steps=("precheck", "status_smoke"),
+                prerequisites=("precheck",),
+                artifact_requirements=("env_file",),
+                when_missing_artifact_ask="Environment file is missing. Run precheck first?",
+                success_criteria="Pytest summary shows no failures.",
+                failure_criteria="Any pytest failure or incomplete test.",
                 runs_observed=3,
             ),
         )
@@ -362,6 +368,25 @@ class TestRequestHandlerStatusVerb:
             "failed",
             "incomplete",
         ]
+        assert response.payload["test_context"]["workflow_steps"] == [
+            "precheck",
+            "status_smoke",
+        ]
+        assert response.payload["test_context"]["prerequisites"] == [
+            "precheck",
+        ]
+        assert response.payload["test_context"]["artifact_requirements"] == [
+            "env_file",
+        ]
+        assert response.payload["test_context"]["when_missing_artifact_ask"] == (
+            "Environment file is missing. Run precheck first?"
+        )
+        assert response.payload["test_context"]["success_criteria"] == (
+            "Pytest summary shows no failures."
+        )
+        assert response.payload["test_context"]["failure_criteria"] == (
+            "Any pytest failure or incomplete test."
+        )
         assert response.payload["parsed_output"]["framework"] == "pytest"
         assert response.payload["parsed_output"]["summary"]["passed"] == 1
         assert response.payload["parsed_output"]["summary"]["failed"] == 1

@@ -260,6 +260,19 @@ class ReadWikiTool(InfoRetrievalTool):
                 "command_pattern": knowledge.command_pattern,
                 "purpose": knowledge.purpose,
                 "output_format": knowledge.output_format,
+                "test_file_path": knowledge.test_file_path,
+                "summary_fields": list(knowledge.summary_fields),
+                "required_args": list(knowledge.required_args),
+                "workflow_steps": list(knowledge.workflow_steps),
+                "prerequisites": list(knowledge.prerequisites),
+                "artifact_requirements": list(
+                    knowledge.artifact_requirements
+                ),
+                "when_missing_artifact_ask": (
+                    knowledge.when_missing_artifact_ask
+                ),
+                "success_criteria": knowledge.success_criteria,
+                "failure_criteria": knowledge.failure_criteria,
                 "common_failures": list(knowledge.common_failures),
                 "normal_behavior": knowledge.normal_behavior,
                 "runs_observed": knowledge.runs_observed,

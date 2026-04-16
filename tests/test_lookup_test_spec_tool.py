@@ -65,6 +65,12 @@ def _save_knowledge(
     common_failures: tuple[str, ...] = ("timeout on large inputs",),
     normal_behavior: str = "All iterations pass",
     required_args: tuple[str, ...] = (),
+    workflow_steps: tuple[str, ...] = (),
+    prerequisites: tuple[str, ...] = (),
+    artifact_requirements: tuple[str, ...] = (),
+    when_missing_artifact_ask: str = "",
+    success_criteria: str = "",
+    failure_criteria: str = "",
     runs_observed: int = 10,
 ) -> None:
     """Helper to persist a test knowledge entry to the wiki."""
@@ -83,6 +89,12 @@ def _save_knowledge(
         common_failures=common_failures,
         normal_behavior=normal_behavior,
         required_args=required_args,
+        workflow_steps=workflow_steps,
+        prerequisites=prerequisites,
+        artifact_requirements=artifact_requirements,
+        when_missing_artifact_ask=when_missing_artifact_ask,
+        success_criteria=success_criteria,
+        failure_criteria=failure_criteria,
         runs_observed=runs_observed,
     )
     save_test_knowledge(wiki_root, knowledge)
@@ -162,7 +174,16 @@ class TestWikiDelegation:
         self, wiki_root: Path, tool: LookupTestSpecTool
     ) -> None:
         """When a test spec exists, it must return all fields."""
-        _save_knowledge(wiki_root, required_args=("iterations", "host"))
+        _save_knowledge(
+            wiki_root,
+            required_args=("iterations", "host"),
+            workflow_steps=("calibration", "lt_test"),
+            prerequisites=("calibration",),
+            artifact_requirements=("calibration_file",),
+            when_missing_artifact_ask="Run calibration first?",
+            success_criteria="LT passes.",
+            failure_criteria="LT fails.",
+        )
 
         result = await tool.execute(
             call_id="c1", args={"test_name": "python3 ~/agent_test.py"}
@@ -186,6 +207,12 @@ class TestWikiDelegation:
         assert "timeout on large inputs" in data["common_failures"]
         assert data["normal_behavior"] == "All iterations pass"
         assert data["required_args"] == ["iterations", "host"]
+        assert data["workflow_steps"] == ["calibration", "lt_test"]
+        assert data["prerequisites"] == ["calibration"]
+        assert data["artifact_requirements"] == ["calibration_file"]
+        assert data["when_missing_artifact_ask"] == "Run calibration first?"
+        assert data["success_criteria"] == "LT passes."
+        assert data["failure_criteria"] == "LT fails."
         assert data["runs_observed"] == 10
 
     @pytest.mark.asyncio
@@ -796,6 +823,12 @@ class TestJsonOutputStructure:
             "common_failures",
             "normal_behavior",
             "required_args",
+            "workflow_steps",
+            "prerequisites",
+            "artifact_requirements",
+            "when_missing_artifact_ask",
+            "success_criteria",
+            "failure_criteria",
             "runs_observed",
         }
         assert set(data.keys()) == expected_keys

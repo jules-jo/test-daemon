@@ -49,6 +49,8 @@ What exists now:
 - daemon-managed `pages/daemon/workflows/` and `pages/daemon/workflow-steps/`
 - one workflow per launched run with a single `primary-run` step
 - workflow-aware `status` output, including latest persisted workflow state
+- workflow-aware test-knowledge schema fields such as `workflow_steps`, `prerequisites`, and `artifact_requirements`
+- a first deterministic planner/preflight module in `src/jules_daemon/workflows/planner.py`
 
 What still remains for later phases:
 
@@ -477,6 +479,10 @@ Done when:
 - a test spec can express prerequisites and artifact checks
 - a request like `run lt test` can produce a plan with `calibration -> lt`
 - the planner can tell whether a user question is needed before execution
+
+Status:
+
+- partially implemented on 2026-04-16 via workflow-aware test-knowledge fields plus a deterministic planner/preflight layer
 
 ### Phase 3: Step runner and workflow transitions
 

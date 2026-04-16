@@ -60,3 +60,6 @@ Added `wiki/pages/architecture/stateful-test-workflow-implementation-plan.md` to
 
 ## [2026-04-16] implementation | Added Phase 1 workflow state foundation
 Implemented the first workflow slice in code: new workflow models, a wiki-backed workflow/step store, a read-side workflow status service, and request-handler integration that creates one workflow per launched run, updates it on completion or cancellation, and exposes workflow snapshots through `status`.
+
+## [2026-04-16] implementation | Added workflow-aware test knowledge schema and planner groundwork
+Extended `TestKnowledge` with workflow-specific fields such as `workflow_steps`, `prerequisites`, `artifact_requirements`, `when_missing_artifact_ask`, `success_criteria`, and `failure_criteria`. Added a deterministic workflow planner/preflight module, exposed the new fields through `lookup_test_spec`, `read_wiki`, and status test context, and documented the authoring format in `wiki/pages/concepts/workflow-aware-test-knowledge-schema.md`.

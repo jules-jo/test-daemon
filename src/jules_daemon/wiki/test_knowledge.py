@@ -154,6 +154,19 @@ class TestKnowledge:
             (e.g., ``("iterations", "host")``). Populated from the user's
             starter spec in the wiki. The agent loop uses this to detect
             missing arguments and prompt the user via ask_user_question.
+        workflow_steps: Ordered tuple of logical workflow step names for
+            this test family. When present, these capture the intended
+            step sequence, for example ``("calibration", "lt_test")``.
+        prerequisites: Tuple of prerequisite step or capability names
+            that should be satisfied before the primary step can run.
+        artifact_requirements: Tuple of artifact names that must be
+            present before the primary step is considered ready.
+        when_missing_artifact_ask: Optional user-facing question prompt
+            to ask when one or more required artifacts are missing.
+        success_criteria: Human-readable criteria describing when the
+            workflow should be treated as successful.
+        failure_criteria: Human-readable criteria describing what
+            constitutes a failed workflow or step.
         runs_observed: Number of completed runs the daemon has learned
             from. Incremented on each merge.
         last_updated: UTC timestamp of the most recent merge.
@@ -172,6 +185,12 @@ class TestKnowledge:
     common_failures: tuple[str, ...] = field(default_factory=tuple)
     normal_behavior: str = ""
     required_args: tuple[str, ...] = field(default_factory=tuple)
+    workflow_steps: tuple[str, ...] = field(default_factory=tuple)
+    prerequisites: tuple[str, ...] = field(default_factory=tuple)
+    artifact_requirements: tuple[str, ...] = field(default_factory=tuple)
+    when_missing_artifact_ask: str = ""
+    success_criteria: str = ""
+    failure_criteria: str = ""
     runs_observed: int = 0
     last_updated: datetime = field(default_factory=_now_utc)
 
@@ -210,6 +229,27 @@ class TestKnowledge:
             lines.append(
                 f"- Required arguments: {', '.join(self.required_args)}"
             )
+        if self.workflow_steps:
+            lines.append(
+                f"- Workflow steps: {', '.join(self.workflow_steps)}"
+            )
+        if self.prerequisites:
+            lines.append(
+                f"- Prerequisites: {', '.join(self.prerequisites)}"
+            )
+        if self.artifact_requirements:
+            lines.append(
+                "- Required artifacts: "
+                + ", ".join(self.artifact_requirements)
+            )
+        if self.when_missing_artifact_ask:
+            lines.append(
+                f"- Missing artifact prompt: {self.when_missing_artifact_ask}"
+            )
+        if self.success_criteria:
+            lines.append(f"- Success criteria: {self.success_criteria}")
+        if self.failure_criteria:
+            lines.append(f"- Failure criteria: {self.failure_criteria}")
         if self.common_failures:
             lines.append("- Common failure patterns:")
             for failure in self.common_failures:
@@ -456,6 +496,12 @@ def _knowledge_to_frontmatter(knowledge: TestKnowledge) -> dict[str, Any]:
         "summary_fields": list(knowledge.summary_fields),
         "normal_behavior": knowledge.normal_behavior,
         "required_args": list(knowledge.required_args),
+        "workflow_steps": list(knowledge.workflow_steps),
+        "prerequisites": list(knowledge.prerequisites),
+        "artifact_requirements": list(knowledge.artifact_requirements),
+        "when_missing_artifact_ask": knowledge.when_missing_artifact_ask,
+        "success_criteria": knowledge.success_criteria,
+        "failure_criteria": knowledge.failure_criteria,
         "common_failures": list(knowledge.common_failures),
         "runs_observed": knowledge.runs_observed,
         "last_updated": _datetime_to_iso(knowledge.last_updated),
@@ -537,6 +583,16 @@ def _frontmatter_to_knowledge(fm: dict[str, Any]) -> TestKnowledge:
         summary_fields=_coerce_required_args(fm.get("summary_fields")),
         normal_behavior=_coerce_string(fm.get("normal_behavior")),
         required_args=_coerce_required_args(fm.get("required_args")),
+        workflow_steps=_coerce_required_args(fm.get("workflow_steps")),
+        prerequisites=_coerce_required_args(fm.get("prerequisites")),
+        artifact_requirements=_coerce_required_args(
+            fm.get("artifact_requirements")
+        ),
+        when_missing_artifact_ask=_coerce_string(
+            fm.get("when_missing_artifact_ask")
+        ),
+        success_criteria=_coerce_string(fm.get("success_criteria")),
+        failure_criteria=_coerce_string(fm.get("failure_criteria")),
         common_failures=_coerce_failures(fm.get("common_failures")),
         runs_observed=_coerce_runs_observed(fm.get("runs_observed")),
         last_updated=_iso_to_datetime(fm.get("last_updated")),
@@ -603,6 +659,51 @@ def _build_body(knowledge: TestKnowledge) -> str:
         for arg in knowledge.required_args:
             lines.append(f"- `{arg}`")
         lines.append("")
+    if knowledge.workflow_steps:
+        lines.extend([
+            "## Workflow Steps",
+            "",
+        ])
+        for step in knowledge.workflow_steps:
+            lines.append(f"- `{step}`")
+        lines.append("")
+    if knowledge.prerequisites:
+        lines.extend([
+            "## Prerequisites",
+            "",
+        ])
+        for prerequisite in knowledge.prerequisites:
+            lines.append(f"- `{prerequisite}`")
+        lines.append("")
+    if knowledge.artifact_requirements:
+        lines.extend([
+            "## Artifact Requirements",
+            "",
+        ])
+        for artifact_name in knowledge.artifact_requirements:
+            lines.append(f"- `{artifact_name}`")
+        lines.append("")
+    if knowledge.when_missing_artifact_ask:
+        lines.extend([
+            "## Missing Artifact Prompt",
+            "",
+            knowledge.when_missing_artifact_ask,
+            "",
+        ])
+    if knowledge.success_criteria:
+        lines.extend([
+            "## Success Criteria",
+            "",
+            knowledge.success_criteria,
+            "",
+        ])
+    if knowledge.failure_criteria:
+        lines.extend([
+            "## Failure Criteria",
+            "",
+            knowledge.failure_criteria,
+            "",
+        ])
     if knowledge.common_failures:
         lines.extend([
             "## Common Failures",
@@ -741,6 +842,24 @@ def merge_knowledge(
         new_observations.get("summary_fields")
     )
     new_normal = _coerce_string(new_observations.get("normal_behavior"))
+    new_workflow_steps = _coerce_required_args(
+        new_observations.get("workflow_steps")
+    )
+    new_prerequisites = _coerce_required_args(
+        new_observations.get("prerequisites")
+    )
+    new_artifact_requirements = _coerce_required_args(
+        new_observations.get("artifact_requirements")
+    )
+    new_when_missing_artifact_ask = _coerce_string(
+        new_observations.get("when_missing_artifact_ask")
+    )
+    new_success_criteria = _coerce_string(
+        new_observations.get("success_criteria")
+    )
+    new_failure_criteria = _coerce_string(
+        new_observations.get("failure_criteria")
+    )
     new_failures = _coerce_failures(new_observations.get("common_failures"))
 
     if existing is None:
@@ -756,6 +875,12 @@ def merge_knowledge(
             output_format=new_format,
             summary_fields=new_summary_fields,
             normal_behavior=new_normal,
+            workflow_steps=new_workflow_steps,
+            prerequisites=new_prerequisites,
+            artifact_requirements=new_artifact_requirements,
+            when_missing_artifact_ask=new_when_missing_artifact_ask,
+            success_criteria=new_success_criteria,
+            failure_criteria=new_failure_criteria,
             common_failures=new_failures,
             runs_observed=1,
             last_updated=_now_utc(),
@@ -774,6 +899,17 @@ def merge_knowledge(
         output_format=existing.output_format or new_format,
         summary_fields=existing.summary_fields or new_summary_fields,
         normal_behavior=existing.normal_behavior or new_normal,
+        workflow_steps=existing.workflow_steps or new_workflow_steps,
+        prerequisites=existing.prerequisites or new_prerequisites,
+        artifact_requirements=(
+            existing.artifact_requirements or new_artifact_requirements
+        ),
+        when_missing_artifact_ask=(
+            existing.when_missing_artifact_ask
+            or new_when_missing_artifact_ask
+        ),
+        success_criteria=existing.success_criteria or new_success_criteria,
+        failure_criteria=existing.failure_criteria or new_failure_criteria,
         common_failures=tuple(merged_failures),
         runs_observed=existing.runs_observed + 1,
         last_updated=_now_utc(),
