@@ -2542,7 +2542,7 @@ class TestRequestHandlerInterpretVerb:
             verb=Verb.STATUS,
             confidence=IntentConfidence.HIGH,
             parameters={"verbose": True},
-            raw_input="give me the current status",
+            raw_input="status",
             reasoning="The user wants status.",
         )
 
@@ -2550,17 +2550,53 @@ class TestRequestHandlerInterpretVerb:
             handler,
             "_classify_intent_with_llm",
             AsyncMock(return_value=intent),
+        ), patch.object(
+            handler,
+            "_answer_conversational_request_with_llm",
+            AsyncMock(return_value=None),
         ):
             response = await handler.handle_message(
                 _make_request(payload={
                     "verb": "interpret",
-                    "input_text": "give me the current status",
+                    "input_text": "status",
                 }),
                 client,
             )
 
         assert response.msg_type == MessageType.RESPONSE
         assert response.payload["verb"] == "status"
+
+    @pytest.mark.asyncio
+    async def test_interpret_information_prompt_returns_chat_answer(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        handler = _make_llm_handler(tmp_path)
+        client = _make_client()
+
+        with patch.object(
+            handler,
+            "_answer_conversational_request_with_llm",
+            AsyncMock(return_value="Yes. I know about test X from the saved spec."),
+        ), patch.object(
+            handler,
+            "_classify_intent_with_llm",
+            AsyncMock(),
+        ) as classify_mock:
+            response = await handler.handle_message(
+                _make_request(payload={
+                    "verb": "interpret",
+                    "input_text": "do you know about test X?",
+                }),
+                client,
+            )
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["verb"] == "interpret"
+        assert response.payload["status"] == "answered"
+        assert response.payload["mode"] == "chat"
+        assert "test X" in response.payload["message"]
+        classify_mock.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_interpret_run_dispatches_to_run_with_interpret_request(
@@ -2622,19 +2658,27 @@ class TestRequestHandlerInterpretVerb:
             side_effect=[ask_frame[:4], ask_frame[4:]]
         )
         low_intent = ClassifiedIntent(
-            verb=Verb.STATUS,
+            verb=Verb.RUN,
             confidence=IntentConfidence.LOW,
             parameters={},
-            raw_input="what's going on",
-            reasoning="This might be a status request, but it is ambiguous.",
+            raw_input="can you run it?",
+            reasoning="This looks like a run request, but it is ambiguous.",
         )
         high_intent = ClassifiedIntent(
-            verb=Verb.STATUS,
+            verb=Verb.RUN,
             confidence=IntentConfidence.HIGH,
-            parameters={},
-            raw_input="what's going on",
-            reasoning="The clarified request is status.",
+            parameters={"natural_language": "run the active workflow"},
+            raw_input="can you run it?",
+            reasoning="The clarified request is a run.",
         )
+        expected = MessageEnvelope(
+            msg_type=MessageType.RESPONSE,
+            msg_id="req-001",
+            timestamp="2026-04-09T12:00:02Z",
+            payload={"verb": "run", "status": "started"},
+        )
+        run_handler = AsyncMock(return_value=expected)
+        handler._async_client_dispatch["run"] = run_handler
 
         with patch.object(
             handler,
@@ -2644,13 +2688,12 @@ class TestRequestHandlerInterpretVerb:
             response = await handler.handle_message(
                 _make_request(payload={
                     "verb": "interpret",
-                    "input_text": "what's going on",
+                    "input_text": "can you run it?",
                 }),
                 client,
             )
 
-        assert response.msg_type == MessageType.RESPONSE
-        assert response.payload["verb"] == "status"
+        assert response == expected
         prompt_bytes = b"".join(
             call.args[0] for call in client.writer.write.call_args_list
         )

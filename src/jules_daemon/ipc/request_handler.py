@@ -713,6 +713,148 @@ class RequestHandler:
             )
             return None
 
+    @staticmethod
+    def _looks_like_action_request(user_input: str) -> bool:
+        """Best-effort guard for prompts that should stay on the action path."""
+        normalized = " ".join(user_input.strip().lower().split())
+        if not normalized:
+            return False
+
+        explicit_commands = {
+            "run",
+            "queue",
+            "cancel",
+            "watch",
+            "history",
+            "discover",
+            "status",
+        }
+        if normalized in explicit_commands:
+            return True
+
+        action_prefixes = (
+            "run ",
+            "start ",
+            "execute ",
+            "queue ",
+            "cancel ",
+            "stop ",
+            "watch ",
+            "tail ",
+            "discover ",
+            "learn about ",
+            "create jira",
+            "file jira",
+            "can you run ",
+            "could you run ",
+            "please run ",
+            "can you start ",
+            "could you start ",
+            "please start ",
+            "can you execute ",
+            "could you execute ",
+            "please execute ",
+            "can you cancel ",
+            "could you cancel ",
+            "please cancel ",
+            "show me the output",
+            "show output",
+        )
+        return any(
+            normalized == prefix.strip() or normalized.startswith(prefix)
+            for prefix in action_prefixes
+        )
+
+    async def _build_conversational_answer_context(
+        self,
+        *,
+        user_input: str,
+    ) -> str:
+        """Build compact daemon/test context for chat-style answers."""
+        import json
+
+        sections: list[str] = []
+
+        latest_workflow = build_latest_workflow_status(self._config.wiki_root)
+        if latest_workflow is not None:
+            sections.extend([
+                "Latest workflow status snapshot:",
+                json.dumps(latest_workflow, indent=2, sort_keys=True),
+            ])
+
+        knowledge, matched_slug = await self._run_blocking(
+            find_matching_test_knowledge,
+            self._config.wiki_root,
+            user_input,
+        )
+        if knowledge is not None:
+            sections.extend([
+                f"Matched test knowledge: {matched_slug or knowledge.test_slug}",
+                knowledge.to_prompt_context(),
+            ])
+        else:
+            sections.append("Matched test knowledge: none")
+
+        return "\n\n".join(section for section in sections if section.strip())
+
+    async def _answer_conversational_request_with_llm(
+        self,
+        *,
+        user_input: str,
+    ) -> str | None:
+        """Answer a conversational prompt directly from daemon/wiki context."""
+        if not self._can_use_llm_interpretation:
+            return None
+
+        from jules_daemon.llm.client import create_completion
+
+        interpretation_context = await self._build_interpretation_context()
+        answer_context = await self._build_conversational_answer_context(
+            user_input=user_input,
+        )
+
+        system_prompt = "\n".join([
+            "You are Jules in conversational assistant mode.",
+            "Answer the user's question directly and concisely.",
+            "Use the provided daemon status and wiki/test knowledge context when relevant.",
+            "If a test spec or current status is not known from the provided context, say that plainly.",
+            "Do not invent test details, workflow state, or system information.",
+            "Do not force the user into command syntax in your answer.",
+        ])
+        user_prompt = "\n\n".join([
+            f"User request:\n{user_input}",
+            "Daemon interpretation context:\n"
+            + (interpretation_context or "(none)"),
+            "Relevant workflow/test context:\n"
+            + (answer_context or "(none)"),
+        ])
+
+        def _call_completion() -> Any:
+            return create_completion(
+                client=self._config.llm_client,  # type: ignore[arg-type]
+                config=self._config.llm_config,  # type: ignore[arg-type]
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.0,
+            )
+
+        try:
+            completion = await self._run_blocking(_call_completion)
+            if not getattr(completion, "choices", None):
+                return None
+            content = completion.choices[0].message.content or ""
+            answer = content.strip()
+            return answer or None
+        except Exception as exc:
+            logger.warning(
+                "Conversational answer generation failed for '%s': %s",
+                user_input[:80],
+                exc,
+            )
+            return None
+
     def _build_payload_from_interpreted_intent(
         self,
         *,
@@ -2847,6 +2989,21 @@ class RequestHandler:
                 ),
                 validation_errors=[],
             )
+
+        if not self._looks_like_action_request(raw_input):
+            chat_answer = await self._answer_conversational_request_with_llm(
+                user_input=raw_input,
+            )
+            if chat_answer:
+                return _build_success_response(
+                    msg_id=msg_id,
+                    verb="interpret",
+                    extra={
+                        "status": "answered",
+                        "mode": "chat",
+                        "message": chat_answer,
+                    },
+                )
 
         from jules_daemon.llm.intent_classifier import IntentConfidence
 

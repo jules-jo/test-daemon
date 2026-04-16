@@ -25,6 +25,8 @@ The project should move toward a thinner deterministic front door and a broader 
 
 As of 2026-04-14, the active `cli_main` path now forwards nearly all user requests into a daemon-side `interpret` verb instead of classifying `run` / `status` / `watch` / `cancel` locally. The older front-door helpers still exist in `cli_main.py`, but they are no longer the primary user path.
 
+As of 2026-04-16, the daemon-side `interpret` path is also chat-first for non-action prompts. When a user asks an informational question such as "do you know about test X?" or "what's the current status?", Jules first tries to answer directly from daemon context, workflow state, and matching test knowledge instead of forcing the request through a verb-classification/clarification loop.
+
 The current system works best when the CLI can already identify:
 
 - the canonical verb
@@ -54,7 +56,7 @@ Examples of fragile prompts:
 
 ## Design Direction
 
-The target design is a hybrid:
+The active design is now a hybrid:
 
 ### Thin front door
 
@@ -64,17 +66,23 @@ Keep deterministic handling for obvious structured cases:
 - explicit `run --system NAME ...`
 - explicit `status`, `watch`, `cancel`, `history`
 
-But when a run request is conversational or ambiguous, do not force the CLI to fully resolve it.
+But when a request is conversational or ambiguous, do not force the CLI to fully resolve it.
 
 ### Agent-driven interpretation
 
-Let the daemon pass unresolved natural-language run requests into an agent interpretation path. The agent should infer:
+Let the daemon answer non-action prompts conversationally and pass unresolved natural-language action requests into an agent interpretation path. The agent should infer:
 
 - whether the request is actually a `run`
 - what part of the prompt is the test request
 - whether a target reference likely maps to a known named system
 - which pieces look like test arguments versus transport metadata
 - whether more information is still needed
+
+For purely informational prompts, the daemon should instead:
+
+- gather relevant workflow state
+- gather matching test knowledge
+- answer directly without forcing the user into command syntax
 
 ### Deterministic enforcement after interpretation
 
@@ -92,16 +100,17 @@ So the interface becomes more chat-like, but the runtime stays tool- and daemon-
 
 1. User sends free-form input.
 2. Front door handles obvious structured commands directly.
-3. Unresolved or ambiguous run-like requests are forwarded to daemon-side interpretation.
-4. The agent produces a structured interpretation, for example:
+3. Non-action prompts are answered directly from daemon/wiki context when possible.
+4. Unresolved or ambiguous action-like requests are forwarded to daemon-side interpretation.
+5. The agent produces a structured interpretation, for example:
    - intent: `run`
    - system reference: `tuto`
    - task text: `test A`
    - provided args: `iterations=1`
    - missing info: `name`
-5. Daemon resolves the system reference against `wiki/pages/systems/`.
-6. If target resolution succeeds, the agent loop continues with wiki test lookup, missing-arg questioning, command proposal, approval, and execution.
-7. If target resolution or task interpretation is still insufficient, only then ask the user a follow-up question.
+6. Daemon resolves the system reference against `wiki/pages/systems/`.
+7. If target resolution succeeds, the agent loop continues with wiki test lookup, missing-arg questioning, command proposal, approval, and execution.
+8. If target resolution or task interpretation is still insufficient, only then ask the user a follow-up question.
 
 ## Why Not Make Everything Purely Agentic
 

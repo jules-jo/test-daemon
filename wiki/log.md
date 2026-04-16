@@ -72,3 +72,6 @@ When workflow preflight says prerequisite steps should run first, Jules can now 
 
 ## [2026-04-16] implementation | Added interpreted step state and workflow step notifications
 Sequential workflow steps now persist a generic parser-backed `parsed_status`, active `status` responses can attach live interpreted progress for the active step, and workflow execution emits step-transition alerts (`started`, `completed`, `failed`) through the notification broadcaster when subscribers are present. Updated the repo overview and workflow implementation-plan pages to reflect the new current state and the remaining gap around family-specific interpreters.
+
+## [2026-04-16] implementation | Made daemon-side interpret chat-first for informational prompts
+The active `interpret` path now answers non-action prompts directly from daemon context, workflow state, and matching test knowledge instead of forcing every conversational input through verb classification and clarification. Action-like prompts still use daemon-side LLM intent interpretation plus deterministic validation/dispatch, so Jules is closer to a chat-style interface without giving up the existing execution safety boundaries.
