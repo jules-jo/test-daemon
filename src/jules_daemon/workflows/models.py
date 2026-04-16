@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Any
 
 
 def _now_utc() -> datetime:
@@ -93,6 +94,7 @@ class WorkflowStepRecord:
     summary: str | None = None
     error: str | None = None
     last_output_line: str | None = None
+    parsed_status: dict[str, Any] | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     created_at: datetime = field(default_factory=_now_utc)
@@ -129,6 +131,7 @@ class WorkflowStepRecord:
             started_at=self.started_at or _now_utc(),
             updated_at=_now_utc(),
             error=None,
+            parsed_status=None,
         )
 
     def with_completed_success(
@@ -137,6 +140,7 @@ class WorkflowStepRecord:
         summary: str | None = None,
         last_output_line: str | None = None,
         exit_code: int | None = None,
+        parsed_status: dict[str, Any] | None = None,
     ) -> WorkflowStepRecord:
         """Transition the step to success."""
         return replace(
@@ -149,6 +153,7 @@ class WorkflowStepRecord:
                 else self.last_output_line
             ),
             exit_code=exit_code,
+            parsed_status=parsed_status,
             completed_at=_now_utc(),
             updated_at=_now_utc(),
             error=None,
@@ -161,6 +166,7 @@ class WorkflowStepRecord:
         summary: str | None = None,
         last_output_line: str | None = None,
         exit_code: int | None = None,
+        parsed_status: dict[str, Any] | None = None,
     ) -> WorkflowStepRecord:
         """Transition the step to failure."""
         return replace(
@@ -174,6 +180,7 @@ class WorkflowStepRecord:
                 else self.last_output_line
             ),
             exit_code=exit_code,
+            parsed_status=parsed_status,
             completed_at=_now_utc(),
             updated_at=_now_utc(),
         )

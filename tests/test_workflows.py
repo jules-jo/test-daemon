@@ -114,3 +114,46 @@ def test_latest_workflow_prefers_most_recent_update(tmp_path) -> None:
     assert latest_snapshot is not None
     assert latest_snapshot["workflow_id"] == "run-newer"
     assert list_steps(tmp_path, "run-older") == ()
+
+
+def test_workflow_step_parsed_status_round_trip(tmp_path) -> None:
+    initialize_wiki(tmp_path)
+    workflow = WorkflowRecord(
+        workflow_id="run-parsed-001",
+        request_text="run main check",
+    ).with_completed_success(
+        summary="Workflow completed successfully.",
+        current_step_id="step-01-main-check",
+    )
+    step = WorkflowStepRecord(
+        workflow_id="run-parsed-001",
+        step_id="step-01-main-check",
+        name="main-check",
+    ).with_completed_success(
+        summary="Run completed successfully.",
+        exit_code=0,
+        parsed_status={
+            "state": "completed_success",
+            "progress_message": "test output summary: 1 passed",
+            "summary_fields": {
+                "passed": 1,
+                "failed": 0,
+                "framework": "pytest",
+            },
+        },
+    )
+
+    save_workflow(tmp_path, workflow)
+    save_step(tmp_path, step)
+
+    loaded_step = read_step(tmp_path, "run-parsed-001", "step-01-main-check")
+    snapshot = build_workflow_status(tmp_path, "run-parsed-001")
+
+    assert loaded_step is not None
+    assert loaded_step.parsed_status is not None
+    assert loaded_step.parsed_status["state"] == "completed_success"
+    assert loaded_step.parsed_status["summary_fields"]["passed"] == 1
+    assert snapshot is not None
+    assert snapshot["active_step"]["parsed_status"]["state"] == (
+        "completed_success"
+    )

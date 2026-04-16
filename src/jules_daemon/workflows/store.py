@@ -165,6 +165,7 @@ def _step_to_frontmatter(step: WorkflowStepRecord) -> dict[str, Any]:
         "summary": step.summary,
         "error": step.error,
         "last_output_line": step.last_output_line,
+        "parsed_status": step.parsed_status,
         "started_at": _datetime_to_iso(step.started_at),
         "completed_at": _datetime_to_iso(step.completed_at),
         "created": _datetime_to_iso(step.created_at),
@@ -194,6 +195,11 @@ def _frontmatter_to_step(fm: dict[str, Any]) -> WorkflowStepRecord:
         summary=fm.get("summary"),
         error=fm.get("error"),
         last_output_line=fm.get("last_output_line"),
+        parsed_status=(
+            fm.get("parsed_status")
+            if isinstance(fm.get("parsed_status"), dict)
+            else None
+        ),
         started_at=_iso_to_datetime(fm.get("started_at")),
         completed_at=_iso_to_datetime(fm.get("completed_at")),
         created_at=created_at,
@@ -277,6 +283,19 @@ def _build_step_body(step: WorkflowStepRecord) -> str:
         lines.extend(["## Command", "", f"`{step.command}`", ""])
     if step.last_output_line:
         lines.extend(["## Last Output", "", "```", step.last_output_line, "```", ""])
+    if step.parsed_status:
+        lines.extend(["## Parsed Status", ""])
+        progress_message = step.parsed_status.get("progress_message")
+        if isinstance(progress_message, str) and progress_message.strip():
+            lines.append(f"- **Progress:** {progress_message}")
+        state = step.parsed_status.get("state")
+        if isinstance(state, str) and state.strip():
+            lines.append(f"- **State:** {state}")
+        summary_fields = step.parsed_status.get("summary_fields")
+        if isinstance(summary_fields, dict) and summary_fields:
+            for key, value in summary_fields.items():
+                lines.append(f"- **{key}:** {value}")
+        lines.append("")
     if step.summary:
         lines.extend(["## Summary", "", step.summary, ""])
     if step.error:
@@ -381,4 +400,3 @@ def read_latest_workflow(wiki_root: Path) -> WorkflowRecord | None:
     """Return the most recently updated workflow, if any."""
     workflows = list_workflows(wiki_root, limit=1)
     return workflows[0] if workflows else None
-

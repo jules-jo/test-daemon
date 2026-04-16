@@ -69,3 +69,6 @@ Natural-language runs now resolve workflow-aware test knowledge before the agent
 
 ## [2026-04-16] implementation | Added the first sequential workflow runner
 When workflow preflight says prerequisite steps should run first, Jules can now resolve those workflow steps into concrete test specs, collect any missing step arguments up front, ask for explicit approval per step command, and execute the approved steps sequentially in one background workflow task. Workflow status now persists multiple step records for the same workflow instead of only a single `primary-run` step, and the implementation-plan page now records that automatic `prerequisite -> main step` advancement is live in the first deterministic slice.
+
+## [2026-04-16] implementation | Added interpreted step state and workflow step notifications
+Sequential workflow steps now persist a generic parser-backed `parsed_status`, active `status` responses can attach live interpreted progress for the active step, and workflow execution emits step-transition alerts (`started`, `completed`, `failed`) through the notification broadcaster when subscribers are present. Updated the repo overview and workflow implementation-plan pages to reflect the new current state and the remaining gap around family-specific interpreters.

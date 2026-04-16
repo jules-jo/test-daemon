@@ -57,11 +57,13 @@ What exists now:
 - approved/declined preflight context is now carried into the agent loop system prompt and persisted on the started workflow record
 - approved prerequisite-aware workflows can now switch onto a deterministic background workflow runner in `src/jules_daemon/workflows/runner.py`
 - the run path can now resolve step specs, ask for missing step arguments up front, ask for per-step approval, and then execute `prerequisite -> main step` sequentially while persisting step-by-step workflow state
+- workflow steps now support persisted `parsed_status` fields, backed by a generic interpreter registry under `src/jules_daemon/workflows/interpreters/`
+- active `status` responses can now attach live interpreted progress for the active workflow step instead of only raw output tails
+- sequential workflow execution now emits step-transition notifications (`started`, `completed`, `failed`) through the existing notification broadcaster when subscribers are present
 
 What still remains for later phases:
 
-- step-specific interpreters
-- workflow-driven notifications
+- step-family-specific interpreters beyond the current generic parser-first fallback
 - richer approval/edit semantics once a workflow is already running
 - workflow-specific summaries and pass/fail interpretation driven by step interpreters instead of generic command results
 

@@ -180,6 +180,7 @@ from jules_daemon.workflows.preflight import (
     artifact_presence_from_states,
     inspect_workflow_artifacts,
 )
+from jules_daemon.workflows.interpreters import StepInterpreterRegistry
 from jules_daemon.workflows.runner import (
     WorkflowExecutionPlan,
     WorkflowExecutionStep,
@@ -574,6 +575,7 @@ class RequestHandler:
         self._output_buffer: list[str] = []
         self._output_lock = asyncio.Lock()
         self._output_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._step_interpreters = StepInterpreterRegistry()
         self._job_output_broadcaster = JobOutputBroadcaster()
         self._alert_collector = AlertCollector()
         self._alert_query = AlertQueryService(collector=self._alert_collector)
@@ -4427,7 +4429,7 @@ class RequestHandler:
         step: WorkflowExecutionStep,
         result: RunResult,
         final_step: bool,
-    ) -> None:
+    ) -> WorkflowStepRecord:
         """Persist one completed workflow step and update the workflow."""
         workflow = read_workflow(self._config.wiki_root, workflow_id)
         if workflow is None:
@@ -4455,11 +4457,18 @@ class RequestHandler:
 
         summary = self._workflow_summary_for_result(result)
         last_output_line = self._workflow_last_output_line(result)
+        parsed_status = self._interpret_workflow_step_output(
+            step=step,
+            raw_output=self._workflow_raw_output(result),
+            success=result.success,
+            active=False,
+        )
         if result.success:
             step_record = step_record.with_completed_success(
                 summary=summary,
                 last_output_line=last_output_line,
                 exit_code=result.exit_code,
+                parsed_status=parsed_status,
             )
             if final_step:
                 workflow = workflow.with_completed_success(
@@ -4480,6 +4489,7 @@ class RequestHandler:
                 summary=summary,
                 last_output_line=last_output_line,
                 exit_code=result.exit_code,
+                parsed_status=parsed_status,
             )
             workflow = workflow.with_completed_failure(
                 error=result.error or summary,
@@ -4489,6 +4499,7 @@ class RequestHandler:
 
         save_workflow(self._config.wiki_root, workflow)
         save_workflow_step(self._config.wiki_root, step_record)
+        return step_record
 
     def _record_cancelled_workflow_step(
         self,
@@ -4506,6 +4517,106 @@ class RequestHandler:
             self._config.wiki_root,
             step.with_cancelled(summary="Workflow cancelled by user."),
         )
+
+    def _interpret_workflow_step_output(
+        self,
+        *,
+        step: WorkflowExecutionStep,
+        raw_output: str,
+        success: bool | None,
+        active: bool,
+    ) -> dict[str, Any] | None:
+        """Interpret one workflow step's output through the registry."""
+        return self._step_interpreters.interpret(
+            step_name=step.step_name,
+            command=step.command,
+            raw_output=raw_output,
+            success=success,
+            active=active,
+        )
+
+    async def _emit_workflow_step_notification(
+        self,
+        *,
+        workflow_id: str,
+        step: WorkflowExecutionStep,
+        state: str,
+        message: str,
+        severity: NotificationSeverity,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """Emit a workflow-step transition notification when subscribers exist."""
+        try:
+            await emit_alert(
+                broadcaster=self._config.notification_broadcaster,
+                severity=severity,
+                title=f"Workflow step {state}: {step.step_name}",
+                message=message,
+                run_id=workflow_id,
+                details={
+                    "workflow_id": workflow_id,
+                    "step_id": step.step_id,
+                    "step_name": step.step_name,
+                    "step_phase": step.phase,
+                    **(details or {}),
+                },
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Failed to emit workflow step notification for %s/%s: %s",
+                workflow_id,
+                step.step_id,
+                exc,
+            )
+
+    def _attach_live_workflow_step_status(
+        self,
+        extra: dict[str, Any],
+        *,
+        raw_output: str,
+        active: bool,
+    ) -> None:
+        """Augment the attached workflow snapshot with live interpreted step state."""
+        workflow_snapshot = extra.get("workflow")
+        if not isinstance(workflow_snapshot, dict):
+            return
+        active_step = workflow_snapshot.get("active_step")
+        if not isinstance(active_step, dict):
+            return
+
+        command = str(
+            active_step.get("command") or extra.get("command") or ""
+        ).strip()
+        step_name = str(active_step.get("name") or active_step.get("step_id") or "")
+        if not command or not raw_output.strip():
+            return
+
+        interpreted = self._step_interpreters.interpret(
+            step_name=step_name,
+            command=command,
+            raw_output=raw_output,
+            success=None if active else extra.get("status") == "COMPLETED",
+            active=active,
+        )
+        if interpreted is None:
+            return
+
+        active_step["parsed_status"] = interpreted
+        workflow_snapshot["active_step"] = active_step
+        progress_message = interpreted.get("progress_message")
+        if isinstance(progress_message, str) and progress_message.strip():
+            workflow_snapshot["active_step_summary"] = progress_message
+        steps = workflow_snapshot.get("steps")
+        if isinstance(steps, list):
+            for index, step in enumerate(steps):
+                if (
+                    isinstance(step, dict)
+                    and step.get("step_id") == active_step.get("step_id")
+                ):
+                    updated = dict(step)
+                    updated["parsed_status"] = interpreted
+                    steps[index] = updated
+                    break
 
     def _register_default_monitor_detectors(self) -> None:
         """Install the default detector set for live-run monitoring."""
@@ -4942,13 +5053,21 @@ class RequestHandler:
 
     def _workflow_last_output_line(self, result: RunResult) -> str:
         """Extract the last meaningful output line for workflow summaries."""
-        combined_output = result.stdout or result.stderr or ""
+        combined_output = self._workflow_raw_output(result)
         lines = [
             line.strip()
             for line in combined_output.splitlines()
             if line.strip()
         ]
         return lines[-1] if lines else ""
+
+    def _workflow_raw_output(self, result: RunResult) -> str:
+        """Combine stdout/stderr into one parseable output stream."""
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+        if stdout and stderr:
+            return stdout + "\n" + stderr
+        return stdout or stderr
 
     def _workflow_summary_for_result(self, result: RunResult) -> str:
         """Build a compact workflow summary from a completed run result."""
@@ -5052,6 +5171,22 @@ class RequestHandler:
                     target_user=result.target_user,
                 )
 
+            primary_step = WorkflowExecutionStep(
+                step_id=_PRIMARY_WORKFLOW_STEP_ID,
+                step_name="primary run",
+                phase="main",
+                test_slug="primary-run",
+                command=result.command,
+                command_pattern=result.command,
+                required_args=(),
+            )
+            parsed_status = self._interpret_workflow_step_output(
+                step=primary_step,
+                raw_output=self._workflow_raw_output(result),
+                success=result.success,
+                active=False,
+            )
+
             if result.success:
                 workflow = workflow.with_completed_success(
                     summary=summary,
@@ -5061,6 +5196,7 @@ class RequestHandler:
                     summary=summary,
                     last_output_line=last_output_line,
                     exit_code=result.exit_code,
+                    parsed_status=parsed_status,
                 )
             else:
                 workflow = workflow.with_completed_failure(
@@ -5073,6 +5209,7 @@ class RequestHandler:
                     summary=summary,
                     last_output_line=last_output_line,
                     exit_code=result.exit_code,
+                    parsed_status=parsed_status,
                 )
             save_workflow(self._config.wiki_root, workflow)
             save_workflow_step(self._config.wiki_root, step)
@@ -5325,6 +5462,21 @@ class RequestHandler:
                         target_host=plan.target_host,
                         target_user=plan.target_user,
                     )
+                    await self._emit_workflow_step_notification(
+                        workflow_id=plan.workflow_id,
+                        step=step,
+                        state="started",
+                        message=(
+                            f"Running workflow step '{step.step_name}' "
+                            f"on {plan.target_user}@{plan.target_host}."
+                        ),
+                        severity=NotificationSeverity.INFO,
+                        details={
+                            "command": step.command,
+                            "target_host": plan.target_host,
+                            "target_user": plan.target_user,
+                        },
+                    )
                     result = await self._execute_run_once(
                         run_id=step_run_id,
                         stream_run_id=plan.workflow_id,
@@ -5334,12 +5486,63 @@ class RequestHandler:
                         target_port=plan.target_port,
                     )
                     step_results.append((step, result))
-                    self._record_workflow_step_completed(
+                    step_record = self._record_workflow_step_completed(
                         workflow_id=plan.workflow_id,
                         step=step,
                         result=result,
                         final_step=index == len(plan.steps),
                     )
+                    parsed_status = step_record.parsed_status or {}
+                    progress_message = parsed_status.get("progress_message")
+                    if result.success:
+                        message = (
+                            f"Workflow step '{step.step_name}' completed "
+                            f"successfully."
+                        )
+                        if (
+                            isinstance(progress_message, str)
+                            and progress_message.strip()
+                        ):
+                            message += f" {progress_message}"
+                        await self._emit_workflow_step_notification(
+                            workflow_id=plan.workflow_id,
+                            step=step,
+                            state="completed",
+                            message=message,
+                            severity=NotificationSeverity.SUCCESS,
+                            details={
+                                "command": step.command,
+                                "exit_code": result.exit_code,
+                                "parsed_status": step_record.parsed_status,
+                            },
+                        )
+                    else:
+                        failure_reason = (
+                            progress_message
+                            if (
+                                isinstance(progress_message, str)
+                                and progress_message.strip()
+                            )
+                            else (
+                                result.error
+                                or self._workflow_summary_for_result(result)
+                            )
+                        )
+                        await self._emit_workflow_step_notification(
+                            workflow_id=plan.workflow_id,
+                            step=step,
+                            state="failed",
+                            message=(
+                                f"Workflow step '{step.step_name}' failed. "
+                                f"{failure_reason}"
+                            ),
+                            severity=NotificationSeverity.ERROR,
+                            details={
+                                "command": step.command,
+                                "exit_code": result.exit_code,
+                                "parsed_status": step_record.parsed_status,
+                            },
+                        )
                     if not result.success:
                         break
             except asyncio.CancelledError:
@@ -6166,6 +6369,11 @@ class RequestHandler:
             self._attach_workflow_status(
                 extra,
                 workflow_id=self._current_workflow_id or wiki_run.run_id,
+            )
+            self._attach_live_workflow_step_status(
+                extra,
+                raw_output=raw_output,
+                active=True,
             )
 
             return _build_success_response(

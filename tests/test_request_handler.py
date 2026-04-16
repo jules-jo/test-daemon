@@ -34,7 +34,10 @@ from jules_daemon.ipc.request_handler import (
     RequestHandler,
     RequestHandlerConfig,
 )
-from jules_daemon.protocol.notifications import NotificationEventType
+from jules_daemon.protocol.notifications import (
+    NotificationEventType,
+    NotificationSeverity,
+)
 from jules_daemon.ipc.server import ClientConnection
 from jules_daemon.llm.intent_classifier import (
     ClassifiedIntent,
@@ -1051,6 +1054,10 @@ class TestRequestHandlerWorkflowExecution:
             del stream_run_id, target_port, timeout
             executed_commands.append(command)
             now = datetime.now(timezone.utc)
+            if "setup_step.py" in command:
+                stdout = "tests/test_setup.py::test_ready PASSED\n"
+            else:
+                stdout = "tests/test_main.py::test_target PASSED\n"
             return RunResult(
                 success=True,
                 run_id=run_id,
@@ -1058,7 +1065,7 @@ class TestRequestHandlerWorkflowExecution:
                 target_host=target_host,
                 target_user=target_user,
                 exit_code=0,
-                stdout=f"{command}\nPASS\n",
+                stdout=stdout,
                 started_at=now,
                 completed_at=now,
             )
@@ -1103,6 +1110,15 @@ class TestRequestHandlerWorkflowExecution:
             "completed_success",
             "completed_success",
         ]
+        assert workflow_snapshot["steps"][0]["parsed_status"]["state"] == (
+            "completed_success"
+        )
+        assert workflow_snapshot["steps"][0]["parsed_status"]["summary_fields"][
+            "passed"
+        ] == 1
+        assert workflow_snapshot["steps"][1]["parsed_status"]["state"] == (
+            "completed_success"
+        )
 
         status_response = await handler.handle_message(
             _make_request(payload={"verb": "status"}, msg_id="status-001"),
@@ -1112,6 +1128,196 @@ class TestRequestHandlerWorkflowExecution:
             response.payload["workflow_id"]
         )
         assert status_response.payload["workflow"]["step_count"] == 2
+        assert status_response.payload["workflow"]["steps"][1]["parsed_status"][
+            "summary_fields"
+        ]["passed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_status_active_workflow_includes_live_parsed_step_status(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from jules_daemon.wiki import current_run as current_run_io
+        from jules_daemon.wiki.layout import initialize_wiki
+        from jules_daemon.wiki.models import Command, CurrentRun, RunStatus, SSHTarget
+        from jules_daemon.workflows.models import WorkflowRecord, WorkflowStepRecord
+        from jules_daemon.workflows.store import save_step, save_workflow
+
+        initialize_wiki(tmp_path)
+        handler = RequestHandler(config=RequestHandlerConfig(wiki_root=tmp_path))
+        workflow_id = "run-live-workflow-001"
+        now = datetime.now(timezone.utc)
+
+        save_workflow(
+            tmp_path,
+            WorkflowRecord(
+                workflow_id=workflow_id,
+                request_text="run main check",
+            ).with_running(
+                current_step_id="step-01-main-check",
+                run_id=workflow_id,
+                target_host="10.0.0.10",
+                target_user="root",
+            ),
+        )
+        save_step(
+            tmp_path,
+            WorkflowStepRecord(
+                workflow_id=workflow_id,
+                step_id="step-01-main-check",
+                name="main-check",
+                kind="main",
+            ).with_running(
+                run_id="run-step-001",
+                command="pytest -q",
+                target_host="10.0.0.10",
+                target_user="root",
+            ),
+        )
+        current_run_io.write(
+            tmp_path,
+            CurrentRun(
+                status=RunStatus.RUNNING,
+                run_id=workflow_id,
+                ssh_target=SSHTarget(host="10.0.0.10", user="root"),
+                command=Command(
+                    natural_language="run main check",
+                    resolved_shell="pytest -q",
+                    approved=True,
+                    approved_at=now,
+                ),
+                started_at=now,
+            ),
+        )
+
+        handler._current_run_id = workflow_id
+        handler._current_workflow_id = workflow_id
+        handler._prepare_live_run_state(run_id=workflow_id)
+        handler._publish_live_output_line(
+            workflow_id,
+            "tests/test_live.py::test_ok PASSED\n",
+        )
+        handler._current_task = asyncio.create_task(asyncio.sleep(3600))
+
+        response = await handler.handle_message(
+            _make_request(payload={"verb": "status"}, msg_id="status-live-001"),
+            _make_client(),
+        )
+
+        assert response.payload["state"] == "active"
+        assert response.payload["workflow"]["workflow_id"] == workflow_id
+        assert response.payload["workflow"]["active_step"]["parsed_status"][
+            "state"
+        ] == "running"
+        assert response.payload["workflow"]["active_step"]["parsed_status"][
+            "summary_fields"
+        ]["passed"] == 1
+        assert "test output so far" in response.payload["workflow"][
+            "active_step_summary"
+        ]
+
+        handler._job_output_broadcaster.unregister_job(workflow_id)
+        handler._current_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await handler._current_task
+
+    @pytest.mark.asyncio
+    async def test_workflow_execution_emits_step_alerts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        broadcaster = NotificationBroadcaster()
+        subscription = await broadcaster.subscribe(
+            event_filter=frozenset({NotificationEventType.ALERT}),
+        )
+        handler = RequestHandler(
+            config=RequestHandlerConfig(
+                wiki_root=tmp_path,
+                notification_broadcaster=broadcaster,
+            )
+        )
+        plan = WorkflowExecutionPlan(
+            workflow_id="run-workflow-alerts-001",
+            request_text="run main check",
+            target_host="10.0.0.10",
+            target_user="root",
+            target_port=22,
+            steps=(
+                WorkflowExecutionStep(
+                    step_id="step-01-setup-step",
+                    step_name="setup-step",
+                    phase="prerequisite",
+                    test_slug="setup-step",
+                    command="python3 /root/setup_step.py",
+                    command_pattern="python3 /root/setup_step.py",
+                    required_args=(),
+                ),
+                WorkflowExecutionStep(
+                    step_id="step-02-main-check",
+                    step_name="main-check",
+                    phase="main",
+                    test_slug="main-check",
+                    command="python3 /root/main_check.py --target 5",
+                    command_pattern="python3 /root/main_check.py --target {target}",
+                    required_args=("target",),
+                ),
+            ),
+        )
+
+        async def _fake_execute_run_once(
+            *,
+            run_id: str,
+            stream_run_id: str,
+            target_host: str,
+            target_user: str,
+            command: str,
+            target_port: int,
+            timeout: int = 3600,
+        ) -> RunResult:
+            del stream_run_id, target_port, timeout
+            now = datetime.now(timezone.utc)
+            stdout = (
+                "tests/test_setup.py::test_ready PASSED\n"
+                if "setup_step.py" in command
+                else "tests/test_main.py::test_target PASSED\n"
+            )
+            return RunResult(
+                success=True,
+                run_id=run_id,
+                command=command,
+                target_host=target_host,
+                target_user=target_user,
+                exit_code=0,
+                stdout=stdout,
+                started_at=now,
+                completed_at=now,
+            )
+
+        monkeypatch.setattr(handler, "_execute_run_once", _fake_execute_run_once)
+
+        started = handler._spawn_background_workflow(plan=plan)
+        assert started["workflow_id"] == "run-workflow-alerts-001"
+        assert handler._current_task is not None
+        await handler._current_task
+
+        envelopes = [
+            await broadcaster.receive(subscription.subscription_id, timeout=1.0)
+            for _ in range(4)
+        ]
+
+        assert [envelope.payload.title for envelope in envelopes if envelope] == [
+            "Workflow step started: setup-step",
+            "Workflow step completed: setup-step",
+            "Workflow step started: main-check",
+            "Workflow step completed: main-check",
+        ]
+        assert [envelope.payload.severity for envelope in envelopes if envelope] == [
+            NotificationSeverity.INFO,
+            NotificationSeverity.SUCCESS,
+            NotificationSeverity.INFO,
+            NotificationSeverity.SUCCESS,
+        ]
 
     @pytest.mark.asyncio
     async def test_cancel_marks_active_workflow_by_workflow_id(

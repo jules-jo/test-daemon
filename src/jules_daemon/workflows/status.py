@@ -46,6 +46,8 @@ def _step_snapshot(step: Any) -> dict[str, Any]:
         snapshot["error"] = step.error
     if step.last_output_line:
         snapshot["last_output_line"] = step.last_output_line
+    if step.parsed_status:
+        snapshot["parsed_status"] = step.parsed_status
     if step.started_at:
         snapshot["started_at"] = step.started_at.isoformat()
     if step.completed_at:
@@ -113,4 +115,3 @@ def build_latest_workflow_status(wiki_root: Path) -> dict[str, Any] | None:
     if workflow is None:
         return None
     return build_workflow_status(wiki_root, workflow.workflow_id)
-
