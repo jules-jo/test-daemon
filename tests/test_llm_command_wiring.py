@@ -19,6 +19,10 @@ fallback behavior, not actual LLM behavior.
 
 from __future__ import annotations
 
+import importlib
+import os
+import sys
+import os
 import asyncio
 from pathlib import Path
 from typing import Any
@@ -462,3 +466,22 @@ class TestTryLoadLLM:
             client, config = _try_load_llm()
         assert client is None
         assert config is None
+
+    def test_load_dotenv_helper_overrides_existing_model(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo_src = Path(__file__).resolve().parents[1] / 'src'
+        monkeypatch.syspath_prepend(str(repo_src))
+        sys.modules.pop('jules_daemon.__main__', None)
+        sys.modules.pop('jules_daemon', None)
+        daemon_main = importlib.import_module('jules_daemon.__main__')
+
+        env_file = tmp_path / '.env'
+        env_file.write_text(
+            'JULES_LLM_DEFAULT_MODEL=openai:conn:gpt-4o-mini\n',
+            encoding='utf-8',
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv('JULES_LLM_DEFAULT_MODEL', 'openai:conn:gpt-4o')
+
+        daemon_main._load_dotenv_if_available()
+
+        assert os.environ['JULES_LLM_DEFAULT_MODEL'] == 'openai:conn:gpt-4o-mini'
