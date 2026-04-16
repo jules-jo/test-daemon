@@ -55,13 +55,15 @@ What exists now:
 - explicit path-like artifact requirements can now be checked remotely over SSH in `src/jules_daemon/workflows/preflight.py`
 - missing or unverifiable artifacts can now trigger a preflight user question before the agent loop starts
 - approved/declined preflight context is now carried into the agent loop system prompt and persisted on the started workflow record
+- approved prerequisite-aware workflows can now switch onto a deterministic background workflow runner in `src/jules_daemon/workflows/runner.py`
+- the run path can now resolve step specs, ask for missing step arguments up front, ask for per-step approval, and then execute `prerequisite -> main step` sequentially while persisting step-by-step workflow state
 
 What still remains for later phases:
 
-- multi-step advancement
 - step-specific interpreters
 - workflow-driven notifications
-- a runner that can automatically chain `prerequisite -> main step` after a background step finishes
+- richer approval/edit semantics once a workflow is already running
+- workflow-specific summaries and pass/fail interpretation driven by step interpreters instead of generic command results
 
 ## Scope
 
@@ -499,6 +501,12 @@ Done when:
 
 - Jules can run one prerequisite step, then advance to the primary step automatically
 - workflow state transitions are persisted, not inferred only from logs
+
+Status:
+
+- implemented on 2026-04-16 for the first deterministic slice
+- current behavior resolves step specs before launch, collects missing step args up front, asks for step-level approval, then runs the approved steps sequentially in one background workflow task
+- current limitations: no mid-workflow command re-planning, no step-specific output interpreters yet, and no dedicated workflow notification UX beyond existing status/watch plumbing
 
 ### Phase 4: Output interpretation
 

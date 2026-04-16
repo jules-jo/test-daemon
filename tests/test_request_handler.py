@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -38,6 +39,11 @@ from jules_daemon.ipc.server import ClientConnection
 from jules_daemon.llm.intent_classifier import (
     ClassifiedIntent,
     IntentConfidence,
+)
+from jules_daemon.execution.run_pipeline import RunResult
+from jules_daemon.workflows.runner import (
+    WorkflowExecutionPlan,
+    WorkflowExecutionStep,
 )
 
 
@@ -894,7 +900,7 @@ class TestRequestHandlerWorkflowPreflight:
             msg_type=MessageType.CONFIRM_REPLY,
             msg_id="ask-workflow-001",
             timestamp="2026-04-09T12:00:01Z",
-            payload={"approved": True, "answer": "yes"},
+            payload={"approved": True, "answer": "no"},
         )
         ask_frame = encode_frame(ask_reply)
         client.reader.readexactly = AsyncMock(
@@ -949,9 +955,234 @@ class TestRequestHandlerWorkflowPreflight:
         assert workflow_context["matched_test_slug"] == "lt-test"
         assert workflow_context["workflow_steps"] == ["calibration", "lt-test"]
         assert workflow_context["preflight"]["user_decision"] == (
-            "approved_prerequisites"
+            "declined_prerequisites"
         )
-        assert workflow_context["preflight"]["should_run_prerequisites"] is True
+        assert workflow_context["preflight"]["should_run_prerequisites"] is False
+
+
+class TestRequestHandlerWorkflowExecution:
+    """Sequential workflow execution should persist step-by-step state."""
+
+    @staticmethod
+    def _queue_reply_frames(*replies: MessageEnvelope) -> list[bytes]:
+        chunks: list[bytes] = []
+        for reply in replies:
+            frame = encode_frame(reply)
+            chunks.extend([frame[:4], frame[4:]])
+        return chunks
+
+    @pytest.mark.asyncio
+    async def test_run_executes_prerequisite_then_main_workflow(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from jules_daemon.wiki.test_knowledge import (
+            TestKnowledge,
+            save_test_knowledge,
+        )
+        from jules_daemon.workflows.status import build_workflow_status
+
+        handler = _make_llm_handler(tmp_path)
+        client = _make_client()
+
+        client.reader.readexactly = AsyncMock(
+            side_effect=self._queue_reply_frames(
+                MessageEnvelope(
+                    msg_type=MessageType.CONFIRM_REPLY,
+                    msg_id="preflight-001",
+                    timestamp="2026-04-16T12:00:01Z",
+                    payload={"approved": True, "answer": "yes"},
+                ),
+                MessageEnvelope(
+                    msg_type=MessageType.CONFIRM_REPLY,
+                    msg_id="step-approve-001",
+                    timestamp="2026-04-16T12:00:02Z",
+                    payload={"approved": True},
+                ),
+                MessageEnvelope(
+                    msg_type=MessageType.CONFIRM_REPLY,
+                    msg_id="arg-001",
+                    timestamp="2026-04-16T12:00:03Z",
+                    payload={"approved": True, "answer": "5"},
+                ),
+                MessageEnvelope(
+                    msg_type=MessageType.CONFIRM_REPLY,
+                    msg_id="step-approve-002",
+                    timestamp="2026-04-16T12:00:04Z",
+                    payload={"approved": True},
+                ),
+            )
+        )
+
+        save_test_knowledge(
+            tmp_path,
+            TestKnowledge(
+                test_slug="lt-test",
+                command_pattern="python3 /root/lt.py --target {target}",
+                required_args=("target",),
+                workflow_steps=("calibration", "lt-test"),
+                prerequisites=("calibration",),
+                artifact_requirements=("calibration_file",),
+                success_criteria="LT summary reports zero failures.",
+                failure_criteria="Calibration fails or LT reports any failure.",
+            ),
+        )
+        save_test_knowledge(
+            tmp_path,
+            TestKnowledge(
+                test_slug="calibration",
+                command_pattern="python3 /root/calibration.py",
+            ),
+        )
+
+        executed_commands: list[str] = []
+
+        async def _fake_execute_run_once(
+            *,
+            run_id: str,
+            stream_run_id: str,
+            target_host: str,
+            target_user: str,
+            command: str,
+            target_port: int,
+            timeout: int = 3600,
+        ) -> RunResult:
+            del stream_run_id, target_port, timeout
+            executed_commands.append(command)
+            now = datetime.now(timezone.utc)
+            return RunResult(
+                success=True,
+                run_id=run_id,
+                command=command,
+                target_host=target_host,
+                target_user=target_user,
+                exit_code=0,
+                stdout=f"{command}\nPASS\n",
+                started_at=now,
+                completed_at=now,
+            )
+
+        monkeypatch.setattr(handler, "_execute_run_once", _fake_execute_run_once)
+
+        response = await handler.handle_message(
+            _make_request(payload={
+                "verb": "run",
+                "target_host": "10.0.0.10",
+                "target_user": "root",
+                "natural_language": "run lt test",
+            }),
+            client,
+        )
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["status"] == "started"
+        assert response.payload["mode"] == "workflow"
+        assert response.payload["workflow_id"].startswith("run-")
+        assert [step["name"] for step in response.payload["workflow_steps"]] == [
+            "calibration",
+            "lt-test",
+        ]
+
+        assert handler._current_task is not None
+        await handler._current_task
+
+        assert executed_commands == [
+            "python3 /root/calibration.py",
+            "python3 /root/lt.py --target 5",
+        ]
+
+        workflow_snapshot = build_workflow_status(
+            tmp_path,
+            response.payload["workflow_id"],
+        )
+        assert workflow_snapshot is not None
+        assert workflow_snapshot["status"] == "completed_success"
+        assert workflow_snapshot["step_count"] == 2
+        assert [step["status"] for step in workflow_snapshot["steps"]] == [
+            "completed_success",
+            "completed_success",
+        ]
+
+        status_response = await handler.handle_message(
+            _make_request(payload={"verb": "status"}, msg_id="status-001"),
+            client,
+        )
+        assert status_response.payload["workflow"]["workflow_id"] == (
+            response.payload["workflow_id"]
+        )
+        assert status_response.payload["workflow"]["step_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_cancel_marks_active_workflow_by_workflow_id(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from jules_daemon.wiki.layout import initialize_wiki
+        from jules_daemon.workflows.store import read_workflow
+
+        initialize_wiki(tmp_path)
+        handler = RequestHandler(config=RequestHandlerConfig(wiki_root=tmp_path))
+        plan = WorkflowExecutionPlan(
+            workflow_id="run-workflow-123",
+            request_text="run lt test",
+            target_host="10.0.0.10",
+            target_user="root",
+            target_port=22,
+            steps=(
+                WorkflowExecutionStep(
+                    step_id="step-01-calibration",
+                    step_name="calibration",
+                    phase="prerequisite",
+                    test_slug="calibration",
+                    command="python3 /root/calibration.py",
+                    command_pattern="python3 /root/calibration.py",
+                    required_args=(),
+                ),
+                WorkflowExecutionStep(
+                    step_id="step-02-lt-test",
+                    step_name="lt-test",
+                    phase="main",
+                    test_slug="lt-test",
+                    command="python3 /root/lt.py --target 5",
+                    command_pattern="python3 /root/lt.py --target {target}",
+                    required_args=("target",),
+                ),
+            ),
+        )
+
+        async def _fake_background_execute_workflow(*, plan: WorkflowExecutionPlan) -> RunResult:
+            del plan
+            await asyncio.sleep(3600)
+            raise AssertionError("workflow task should be cancelled before completion")
+
+        monkeypatch.setattr(
+            handler,
+            "_background_execute_workflow",
+            _fake_background_execute_workflow,
+        )
+
+        started = handler._spawn_background_workflow(plan=plan)
+        task = handler._current_task
+        assert task is not None
+        assert started["workflow_id"] == "run-workflow-123"
+
+        response = handler._handle_cancel("cancel-001", {})
+
+        assert response.payload["status"] == "cancelled"
+        assert response.payload["workflow_id"] == "run-workflow-123"
+
+        workflow = read_workflow(tmp_path, "run-workflow-123")
+        assert workflow is not None
+        assert workflow.status.value == "cancelled"
+
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+class TestRequestHandlerQueuePersistence:
+    """Queue-related persistence and ordering behavior."""
 
     @pytest.mark.asyncio
     async def test_queue_creates_wiki_file(self, tmp_path: Path) -> None:

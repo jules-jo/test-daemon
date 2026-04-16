@@ -91,6 +91,11 @@ from jules_daemon.execution.run_pipeline import (
     RunResult,
     execute_run,
 )
+from jules_daemon.agent.argument_collector import (
+    ArgumentCollectionStatus,
+    collect_missing_arguments,
+)
+from jules_daemon.agent.argument_gap import detect_argument_gaps
 from jules_daemon.ipc.framing import (
     HEADER_SIZE,
     MessageEnvelope,
@@ -175,11 +180,20 @@ from jules_daemon.workflows.preflight import (
     artifact_presence_from_states,
     inspect_workflow_artifacts,
 )
+from jules_daemon.workflows.runner import (
+    WorkflowExecutionPlan,
+    WorkflowExecutionStep,
+    build_required_command_args,
+    build_workflow_step_id,
+    normalize_step_name,
+    render_command_pattern,
+)
 from jules_daemon.workflows.status import (
     build_latest_workflow_status,
     build_workflow_status,
 )
 from jules_daemon.workflows.store import (
+    list_steps as list_workflow_steps,
     read_step as read_workflow_step,
     read_workflow,
     save_step as save_workflow_step,
@@ -556,6 +570,7 @@ class RequestHandler:
         self._queue = CommandQueue(wiki_root=config.wiki_root)
         self._current_task: asyncio.Task[RunResult] | None = None
         self._current_run_id: str | None = None
+        self._current_workflow_id: str | None = None
         self._output_buffer: list[str] = []
         self._output_lock = asyncio.Lock()
         self._output_queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -1990,6 +2005,329 @@ class RequestHandler:
         enriched["_workflow_artifact_states"] = artifact_states
         return enriched
 
+    @staticmethod
+    def _workflow_step_names_from_context(
+        workflow_context: dict[str, Any],
+    ) -> tuple[str, ...]:
+        """Return the concrete step sequence the workflow should execute."""
+        preflight = workflow_context.get("preflight", {})
+        should_run_prerequisites = False
+        if isinstance(preflight, dict):
+            should_run_prerequisites = (
+                preflight.get("should_run_prerequisites") is True
+            )
+
+        prerequisite_steps = tuple(
+            str(name).strip()
+            for name in workflow_context.get("prerequisite_steps", ())
+            if str(name).strip()
+        )
+        main_steps = tuple(
+            str(name).strip()
+            for name in workflow_context.get("main_steps", ())
+            if str(name).strip()
+        )
+        workflow_steps = tuple(
+            str(name).strip()
+            for name in workflow_context.get("workflow_steps", ())
+            if str(name).strip()
+        )
+
+        if should_run_prerequisites and prerequisite_steps:
+            combined = prerequisite_steps + main_steps
+            if combined:
+                return combined
+        if main_steps:
+            return main_steps
+        if workflow_steps:
+            return workflow_steps
+        matched_slug = str(
+            workflow_context.get("matched_test_slug", "")
+        ).strip()
+        return (matched_slug,) if matched_slug else ()
+
+    async def _resolve_workflow_step_knowledge(
+        self,
+        *,
+        step_name: str,
+        root_knowledge: TestKnowledge,
+    ) -> TestKnowledge | None:
+        """Resolve workflow step knowledge from a configured step name."""
+        normalized_step = normalize_step_name(step_name)
+        if normalized_step == normalize_step_name(root_knowledge.test_slug):
+            return root_knowledge
+
+        candidate, _matched_slug = await self._run_blocking(
+            find_matching_test_knowledge,
+            self._config.wiki_root,
+            step_name,
+        )
+        if candidate is not None:
+            return candidate
+        return None
+
+    async def _collect_workflow_step_arguments(
+        self,
+        *,
+        knowledge: TestKnowledge,
+        collected_args: dict[str, str],
+        client: ClientConnection,
+    ) -> dict[str, str] | str:
+        """Ask for any missing args needed to render one workflow step."""
+        required_args = build_required_command_args(knowledge)
+        if not required_args:
+            return dict(collected_args)
+
+        gap_result = detect_argument_gaps(
+            required_args=required_args,
+            provided_args=collected_args,
+        )
+        if gap_result.is_complete:
+            return dict(collected_args)
+
+        from jules_daemon.agent.ipc_bridge import make_ask_callback
+
+        ask_cb = make_ask_callback(client)
+        result = await collect_missing_arguments(
+            gap_result=gap_result,
+            ask_callback=ask_cb,
+            test_name=knowledge.test_slug,
+        )
+        if result.status is ArgumentCollectionStatus.CANCELLED:
+            return "Run cancelled."
+        if result.status is ArgumentCollectionStatus.ERROR:
+            return (
+                "Failed to collect required arguments for workflow step "
+                f"'{knowledge.test_slug}': {result.error_message or 'unknown error'}"
+            )
+
+        merged = dict(collected_args)
+        merged.update(result.collected_args)
+        return merged
+
+    async def _confirm_workflow_step_command(
+        self,
+        *,
+        msg_id: str,
+        parsed: dict[str, Any],
+        client: ClientConnection,
+        step_name: str,
+        step_index: int,
+        step_count: int,
+        proposed_command: str,
+    ) -> str | None:
+        """Ask the user to approve one workflow step command."""
+        target_host = str(parsed.get("target_host", "")).strip()
+        target_user = str(parsed.get("target_user", "")).strip()
+        target_port = int(parsed.get("target_port", 22))
+
+        confirm_prompt = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_PROMPT,
+            msg_id=f"workflow-confirm-{uuid.uuid4().hex[:12]}",
+            timestamp=_now_iso(),
+            payload={
+                "proposed_command": proposed_command,
+                "original_msg_id": msg_id,
+                "message": (
+                    f"Approve workflow step {step_index}/{step_count} "
+                    f"('{step_name}') on {target_user}@{target_host}:{target_port}?\n"
+                    f"  $ {proposed_command}"
+                ),
+                "workflow_step_name": step_name,
+                "workflow_step_index": step_index,
+                "workflow_step_count": step_count,
+                **self._build_confirm_target_payload(
+                    parsed=parsed,
+                    target_host=target_host,
+                    target_user=target_user,
+                    target_port=target_port,
+                ),
+            },
+        )
+        await self._send_envelope(client, confirm_prompt)
+        reply = await self._read_envelope(client, timeout=120.0)
+        if reply is None:
+            raise RuntimeError(
+                "CLI disconnected before confirming workflow step execution"
+            )
+        if reply.msg_type != MessageType.CONFIRM_REPLY:
+            raise RuntimeError(
+                "Expected confirm_reply while approving workflow step"
+            )
+        if not reply.payload.get("approved", False):
+            return None
+
+        edited_command = reply.payload.get("edited_command")
+        if isinstance(edited_command, str) and edited_command.strip():
+            return edited_command.strip()
+        return proposed_command
+
+    async def _build_workflow_execution_plan(
+        self,
+        *,
+        msg_id: str,
+        parsed: dict[str, Any],
+        client: ClientConnection,
+    ) -> WorkflowExecutionPlan | None | str:
+        """Build a deterministic executable plan for a multi-step workflow."""
+        workflow_context = parsed.get("workflow_context")
+        if not isinstance(workflow_context, dict):
+            return None
+
+        preflight = workflow_context.get("preflight", {})
+        if not isinstance(preflight, dict):
+            return None
+        if preflight.get("should_run_prerequisites") is not True:
+            return None
+
+        matched_slug = str(
+            workflow_context.get("matched_test_slug", "")
+        ).strip()
+        if not matched_slug:
+            return (
+                "Workflow preflight did not include a matched test slug. "
+                "Update the workflow-aware test knowledge and try again."
+            )
+
+        root_knowledge = await self._run_blocking(
+            load_test_knowledge,
+            self._config.wiki_root,
+            matched_slug,
+        )
+        if root_knowledge is None:
+            return (
+                f"Workflow-aware test knowledge '{matched_slug}' could not be loaded."
+            )
+
+        step_names = self._workflow_step_names_from_context(workflow_context)
+        if not step_names:
+            return (
+                "Workflow preflight did not resolve any executable steps."
+            )
+
+        collected_args: dict[str, str] = {}
+        execution_steps: list[WorkflowExecutionStep] = []
+        total_steps = len(step_names)
+
+        for index, step_name in enumerate(step_names, start=1):
+            step_knowledge = await self._resolve_workflow_step_knowledge(
+                step_name=step_name,
+                root_knowledge=root_knowledge,
+            )
+            if step_knowledge is None:
+                return (
+                    f"Could not resolve workflow step '{step_name}' into a known "
+                    "test spec. Add a test-knowledge page for that step first."
+                )
+
+            collected = await self._collect_workflow_step_arguments(
+                knowledge=step_knowledge,
+                collected_args=collected_args,
+                client=client,
+            )
+            if isinstance(collected, str):
+                return collected
+            collected_args = collected
+
+            try:
+                rendered_command = render_command_pattern(
+                    command_pattern=step_knowledge.command_pattern,
+                    args=collected_args,
+                )
+            except ValueError as exc:
+                return (
+                    f"Could not render workflow step '{step_name}': {exc}"
+                )
+
+            approved_command = await self._confirm_workflow_step_command(
+                msg_id=msg_id,
+                parsed=parsed,
+                client=client,
+                step_name=step_name,
+                step_index=index,
+                step_count=total_steps,
+                proposed_command=rendered_command,
+            )
+            if approved_command is None:
+                return "Run cancelled."
+
+            execution_steps.append(
+                WorkflowExecutionStep(
+                    step_id=build_workflow_step_id(index, step_name),
+                    step_name=step_name,
+                    phase="main" if index == total_steps else "prerequisite",
+                    test_slug=step_knowledge.test_slug,
+                    command=approved_command,
+                    command_pattern=step_knowledge.command_pattern,
+                    required_args=build_required_command_args(step_knowledge),
+                )
+            )
+
+        return WorkflowExecutionPlan(
+            workflow_id=f"run-{uuid.uuid4().hex[:12]}",
+            request_text=str(parsed.get("natural_language", "")).strip(),
+            target_host=str(parsed.get("target_host", "")).strip(),
+            target_user=str(parsed.get("target_user", "")).strip(),
+            target_port=int(parsed.get("target_port", 22)),
+            steps=tuple(execution_steps),
+        )
+
+    async def _maybe_start_workflow_execution(
+        self,
+        *,
+        msg_id: str,
+        parsed: dict[str, Any],
+        client: ClientConnection,
+    ) -> MessageEnvelope | None:
+        """Start the deterministic workflow runner when prerequisites were approved."""
+        plan_or_error = await self._build_workflow_execution_plan(
+            msg_id=msg_id,
+            parsed=parsed,
+            client=client,
+        )
+        if plan_or_error is None:
+            return None
+        if isinstance(plan_or_error, str):
+            if plan_or_error == "Run cancelled.":
+                return _build_success_response(
+                    msg_id=msg_id,
+                    verb="run",
+                    extra={
+                        "status": "cancelled",
+                        "message": "Workflow execution cancelled.",
+                    },
+                )
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary=plan_or_error,
+                validation_errors=[],
+            )
+
+        artifact_states = parsed.get("_workflow_artifact_states", ())
+        try:
+            started = self._spawn_background_workflow(
+                plan=plan_or_error,
+                artifact_states=(
+                    artifact_states
+                    if isinstance(artifact_states, tuple)
+                    else ()
+                ),
+            )
+        except RuntimeError as exc:
+            return _build_error_response(
+                msg_id=msg_id,
+                error_summary=str(exc),
+                validation_errors=[],
+            )
+        return _build_success_response(
+            msg_id=msg_id,
+            verb="run",
+            extra={
+                **started,
+                "mode": "workflow",
+            },
+        )
+
     def _infer_named_system_from_request(
         self,
         parsed: dict[str, Any],
@@ -2660,6 +2998,14 @@ class RequestHandler:
                     validation_errors=[],
                 )
             parsed = workflow_prepared
+
+            workflow_started = await self._maybe_start_workflow_execution(
+                msg_id=msg_id,
+                parsed=parsed,
+                client=client,
+            )
+            if workflow_started is not None:
+                return workflow_started
 
         # NL commands: try agent loop first if available
         if self._can_use_agent_loop:
@@ -3916,6 +4262,7 @@ class RequestHandler:
         # Clear the previous completed run -- a new run is starting
         self._last_completed_run = None
         self._current_run_id = effective_run_id
+        self._current_workflow_id = workflow_id
         self._prepare_live_run_state(run_id=effective_run_id)
         self._record_started_workflow(
             workflow_id=workflow_id,
@@ -3947,6 +4294,218 @@ class RequestHandler:
             "command": command,
             "message": "Test started. Use 'status' to check progress.",
         }
+
+    def _persist_workflow_execution_plan(
+        self,
+        *,
+        plan: WorkflowExecutionPlan,
+        artifact_states: tuple[ArtifactState, ...] = (),
+    ) -> None:
+        """Persist the initial workflow record and all planned steps."""
+        workflow = WorkflowRecord(
+            workflow_id=plan.workflow_id,
+            request_text=plan.request_text,
+        ).with_running(
+            current_step_id=plan.steps[0].step_id,
+            run_id=plan.workflow_id,
+            target_host=plan.target_host,
+            target_user=plan.target_user,
+            artifact_states=artifact_states,
+        )
+        save_workflow(self._config.wiki_root, workflow)
+        for step in plan.steps:
+            record = WorkflowStepRecord(
+                workflow_id=plan.workflow_id,
+                step_id=step.step_id,
+                name=step.step_name,
+                kind=step.phase,
+            )
+            save_workflow_step(self._config.wiki_root, record)
+
+    def _spawn_background_workflow(
+        self,
+        *,
+        plan: WorkflowExecutionPlan,
+        artifact_states: tuple[ArtifactState, ...] = (),
+    ) -> dict[str, Any]:
+        """Start a daemon-managed sequential workflow and return its start payload."""
+        current_task = asyncio.current_task()
+        if (
+            self._current_task is not None
+            and not self._current_task.done()
+            and current_task is not self._current_task
+        ):
+            raise RuntimeError(
+                "A run is already active; wait for it to finish before "
+                "starting another one."
+            )
+
+        self._last_completed_run = None
+        self._current_run_id = plan.workflow_id
+        self._current_workflow_id = plan.workflow_id
+        self._prepare_live_run_state(run_id=plan.workflow_id)
+        self._persist_workflow_execution_plan(
+            plan=plan,
+            artifact_states=artifact_states,
+        )
+        self._current_task = asyncio.create_task(
+            self._background_execute_workflow(
+                plan=plan,
+            ),
+            name=f"workflow-{plan.workflow_id}",
+        )
+
+        return {
+            "status": "started",
+            "run_id": plan.workflow_id,
+            "workflow_id": plan.workflow_id,
+            "target_host": plan.target_host,
+            "command": plan.steps[-1].command,
+            "workflow_steps": [
+                {
+                    "step_id": step.step_id,
+                    "name": step.step_name,
+                    "phase": step.phase,
+                    "command": step.command,
+                }
+                for step in plan.steps
+            ],
+            "message": (
+                "Workflow started. Use 'status' to check progress."
+            ),
+        }
+
+    def _record_workflow_step_started(
+        self,
+        *,
+        workflow_id: str,
+        step: WorkflowExecutionStep,
+        step_run_id: str,
+        target_host: str,
+        target_user: str,
+    ) -> None:
+        """Persist the transition to one running workflow step."""
+        workflow = read_workflow(self._config.wiki_root, workflow_id)
+        if workflow is None:
+            workflow = WorkflowRecord(
+                workflow_id=workflow_id,
+                request_text=step.command,
+            )
+        workflow = workflow.with_running(
+            current_step_id=step.step_id,
+            run_id=workflow_id,
+            target_host=target_host,
+            target_user=target_user,
+            artifact_states=workflow.artifact_states,
+        )
+        save_workflow(self._config.wiki_root, workflow)
+
+        record = read_workflow_step(
+            self._config.wiki_root,
+            workflow_id,
+            step.step_id,
+        )
+        if record is None:
+            record = WorkflowStepRecord(
+                workflow_id=workflow_id,
+                step_id=step.step_id,
+                name=step.step_name,
+                kind=step.phase,
+            )
+        record = record.with_running(
+            run_id=step_run_id,
+            command=step.command,
+            target_host=target_host,
+            target_user=target_user,
+        )
+        save_workflow_step(self._config.wiki_root, record)
+
+    def _record_workflow_step_completed(
+        self,
+        *,
+        workflow_id: str,
+        step: WorkflowExecutionStep,
+        result: RunResult,
+        final_step: bool,
+    ) -> None:
+        """Persist one completed workflow step and update the workflow."""
+        workflow = read_workflow(self._config.wiki_root, workflow_id)
+        if workflow is None:
+            workflow = WorkflowRecord(
+                workflow_id=workflow_id,
+                request_text=result.command,
+            )
+        step_record = read_workflow_step(
+            self._config.wiki_root,
+            workflow_id,
+            step.step_id,
+        )
+        if step_record is None:
+            step_record = WorkflowStepRecord(
+                workflow_id=workflow_id,
+                step_id=step.step_id,
+                name=step.step_name,
+                kind=step.phase,
+            ).with_running(
+                run_id=result.run_id,
+                command=step.command,
+                target_host=result.target_host,
+                target_user=result.target_user,
+            )
+
+        summary = self._workflow_summary_for_result(result)
+        last_output_line = self._workflow_last_output_line(result)
+        if result.success:
+            step_record = step_record.with_completed_success(
+                summary=summary,
+                last_output_line=last_output_line,
+                exit_code=result.exit_code,
+            )
+            if final_step:
+                workflow = workflow.with_completed_success(
+                    summary=summary,
+                    current_step_id=step.step_id,
+                )
+            else:
+                workflow = workflow.with_running(
+                    current_step_id=step.step_id,
+                    run_id=workflow_id,
+                    target_host=result.target_host,
+                    target_user=result.target_user,
+                    artifact_states=workflow.artifact_states,
+                )
+        else:
+            step_record = step_record.with_completed_failure(
+                error=result.error or summary,
+                summary=summary,
+                last_output_line=last_output_line,
+                exit_code=result.exit_code,
+            )
+            workflow = workflow.with_completed_failure(
+                error=result.error or summary,
+                summary=summary,
+                current_step_id=step.step_id,
+            )
+
+        save_workflow(self._config.wiki_root, workflow)
+        save_workflow_step(self._config.wiki_root, step_record)
+
+    def _record_cancelled_workflow_step(
+        self,
+        *,
+        workflow_id: str,
+        step_id: str | None,
+    ) -> None:
+        """Persist cancellation for the active workflow step, if any."""
+        if not step_id:
+            return
+        step = read_workflow_step(self._config.wiki_root, workflow_id, step_id)
+        if step is None:
+            return
+        save_workflow_step(
+            self._config.wiki_root,
+            step.with_cancelled(summary="Workflow cancelled by user."),
+        )
 
     def _register_default_monitor_detectors(self) -> None:
         """Install the default detector set for live-run monitoring."""
@@ -4530,14 +5089,15 @@ class RequestHandler:
             workflow = read_workflow(self._config.wiki_root, workflow_id)
             if workflow is None:
                 return
+            current_step_id = workflow.current_step_id or _PRIMARY_WORKFLOW_STEP_ID
             step = read_workflow_step(
                 self._config.wiki_root,
                 workflow_id,
-                _PRIMARY_WORKFLOW_STEP_ID,
+                current_step_id,
             )
             workflow = workflow.with_cancelled(
                 summary="Workflow cancelled by user.",
-                current_step_id=_PRIMARY_WORKFLOW_STEP_ID,
+                current_step_id=current_step_id,
             )
             save_workflow(self._config.wiki_root, workflow)
             if step is not None:
@@ -4576,6 +5136,290 @@ class RequestHandler:
 
         if snapshot is not None:
             extra["workflow"] = snapshot
+
+    async def _execute_run_once(
+        self,
+        *,
+        run_id: str,
+        stream_run_id: str,
+        target_host: str,
+        target_user: str,
+        command: str,
+        target_port: int,
+        timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    ) -> RunResult:
+        """Execute one remote command and normalize failures into RunResult."""
+        loop = asyncio.get_running_loop()
+
+        def _on_output(line: str) -> None:
+            loop.call_soon_threadsafe(
+                functools.partial(
+                    self._publish_live_output_line,
+                    stream_run_id,
+                    line,
+                )
+            )
+
+        try:
+            result = await execute_run(
+                target_host=target_host,
+                target_user=target_user,
+                command=command,
+                target_port=target_port,
+                wiki_root=self._config.wiki_root,
+                timeout=timeout,
+                on_output=_on_output,
+                run_id=run_id,
+            )
+            await asyncio.sleep(0)
+            if not result.success:
+                error_summary = (
+                    f"\n!!! RUN FAILED !!!\n"
+                    f"Run ID: {result.run_id}\n"
+                    f"Command: {command}\n"
+                    f"Exit code: {result.exit_code}\n"
+                )
+                if result.error:
+                    error_summary += f"Error: {result.error}\n"
+                if result.stderr:
+                    error_summary += f"Stderr:\n{result.stderr[:1000]}\n"
+                self._publish_live_output_line(
+                    stream_run_id,
+                    error_summary,
+                    dispatch_monitor_alerts=False,
+                )
+                self._last_failure = error_summary
+            return result
+        except Exception as exc:
+            logger.error(
+                "Background run failed with unexpected error: %s",
+                exc,
+                exc_info=True,
+            )
+            try:
+                from jules_daemon.wiki.models import (
+                    Command as WikiCommand,
+                    CurrentRun,
+                    ProcessIDs,
+                    RunStatus,
+                    SSHTarget,
+                )
+                import os
+
+                failed_run = CurrentRun(
+                    status=RunStatus.FAILED,
+                    run_id=run_id,
+                    ssh_target=SSHTarget(
+                        host=target_host,
+                        user=target_user,
+                        port=target_port,
+                    ),
+                    command=WikiCommand(
+                        natural_language=command,
+                        resolved_shell=command,
+                    ),
+                    pids=ProcessIDs(daemon=os.getpid()),
+                    error=str(exc),
+                )
+                current_run_io.write(self._config.wiki_root, failed_run)
+            except Exception as wiki_exc:
+                logger.error(
+                    "Failed to write FAILED state to wiki: %s",
+                    wiki_exc,
+                )
+
+            return RunResult(
+                success=False,
+                run_id=run_id,
+                command=command,
+                target_host=target_host,
+                target_user=target_user,
+                error=str(exc),
+            )
+
+    def _build_workflow_result(
+        self,
+        *,
+        workflow_id: str,
+        request_text: str,
+        target_host: str,
+        target_user: str,
+        step_results: tuple[tuple[WorkflowExecutionStep, RunResult], ...],
+    ) -> RunResult:
+        """Build a synthetic aggregate result for a completed workflow."""
+        final_step, final_result = step_results[-1]
+        success = all(result.success for _, result in step_results)
+        started_at = min(result.started_at for _, result in step_results)
+        completed_at = max(result.completed_at for _, result in step_results)
+        duration_seconds = max(
+            0.0,
+            (completed_at - started_at).total_seconds(),
+        )
+
+        summary_lines = []
+        stdout_blocks: list[str] = []
+        stderr_blocks: list[str] = []
+        for step, result in step_results:
+            status = "ok" if result.success else "failed"
+            summary_lines.append(f"{step.step_name}: {status}")
+            if result.stdout:
+                stdout_blocks.append(f"[{step.step_name}]\n{result.stdout}")
+            if result.stderr:
+                stderr_blocks.append(f"[{step.step_name}]\n{result.stderr}")
+
+        error: str | None = None
+        if not success:
+            error = (
+                f"Workflow failed during '{final_step.step_name}': "
+                f"{final_result.error or self._workflow_summary_for_result(final_result)}"
+            )
+
+        return RunResult(
+            success=success,
+            run_id=workflow_id,
+            command=request_text,
+            target_host=target_host,
+            target_user=target_user,
+            exit_code=final_result.exit_code,
+            stdout="\n\n".join(stdout_blocks),
+            stderr="\n\n".join(stderr_blocks),
+            error=error,
+            duration_seconds=duration_seconds,
+            started_at=started_at,
+            completed_at=completed_at,
+        )
+
+    def _build_aggregate_workflow_summary(
+        self,
+        *,
+        step_results: tuple[tuple[WorkflowExecutionStep, RunResult], ...],
+    ) -> str:
+        """Build a short workflow-level summary across all executed steps."""
+        parts = [
+            f"{step.step_name}: {'ok' if result.success else 'failed'}"
+            for step, result in step_results
+        ]
+        success = all(result.success for _, result in step_results)
+        prefix = (
+            "Workflow completed successfully."
+            if success
+            else "Workflow failed."
+        )
+        return prefix + " Steps: " + "; ".join(parts)
+
+    async def _background_execute_workflow(
+        self,
+        *,
+        plan: WorkflowExecutionPlan,
+    ) -> RunResult:
+        """Execute one approved workflow plan sequentially in the background."""
+        step_results: list[tuple[WorkflowExecutionStep, RunResult]] = []
+        try:
+            try:
+                for index, step in enumerate(plan.steps, start=1):
+                    step_run_id = f"run-{uuid.uuid4().hex[:12]}"
+                    self._record_workflow_step_started(
+                        workflow_id=plan.workflow_id,
+                        step=step,
+                        step_run_id=step_run_id,
+                        target_host=plan.target_host,
+                        target_user=plan.target_user,
+                    )
+                    result = await self._execute_run_once(
+                        run_id=step_run_id,
+                        stream_run_id=plan.workflow_id,
+                        target_host=plan.target_host,
+                        target_user=plan.target_user,
+                        command=step.command,
+                        target_port=plan.target_port,
+                    )
+                    step_results.append((step, result))
+                    self._record_workflow_step_completed(
+                        workflow_id=plan.workflow_id,
+                        step=step,
+                        result=result,
+                        final_step=index == len(plan.steps),
+                    )
+                    if not result.success:
+                        break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "Workflow execution failed unexpectedly for %s: %s",
+                    plan.workflow_id,
+                    exc,
+                    exc_info=True,
+                )
+                failed_result = RunResult(
+                    success=False,
+                    run_id=plan.workflow_id,
+                    command=plan.request_text,
+                    target_host=plan.target_host,
+                    target_user=plan.target_user,
+                    error=str(exc),
+                )
+                workflow = read_workflow(self._config.wiki_root, plan.workflow_id)
+                if workflow is not None:
+                    save_workflow(
+                        self._config.wiki_root,
+                        workflow.with_completed_failure(
+                            error=str(exc),
+                            summary="Workflow failed unexpectedly.",
+                            current_step_id=workflow.current_step_id,
+                        ),
+                    )
+                self._last_completed_run = failed_result
+                return failed_result
+
+            workflow_result = self._build_workflow_result(
+                workflow_id=plan.workflow_id,
+                request_text=plan.request_text,
+                target_host=plan.target_host,
+                target_user=plan.target_user,
+                step_results=tuple(step_results),
+            )
+            workflow = read_workflow(self._config.wiki_root, plan.workflow_id)
+            if workflow is not None:
+                summary = self._build_aggregate_workflow_summary(
+                    step_results=tuple(step_results)
+                )
+                if workflow_result.success:
+                    workflow = workflow.with_completed_success(
+                        summary=summary,
+                        current_step_id=workflow.current_step_id,
+                    )
+                else:
+                    workflow = workflow.with_completed_failure(
+                        error=workflow_result.error or summary,
+                        summary=summary,
+                        current_step_id=workflow.current_step_id,
+                    )
+                save_workflow(self._config.wiki_root, workflow)
+            self._last_completed_run = workflow_result
+
+            try:
+                await emit_run_completion(
+                    broadcaster=self._config.notification_broadcaster,
+                    run_result=workflow_result,
+                    natural_language_command=plan.request_text,
+                )
+            except Exception as notify_exc:
+                logger.warning(
+                    "Failed to emit workflow completion notification for "
+                    "workflow_id=%s: %s",
+                    plan.workflow_id,
+                    notify_exc,
+                )
+
+            return workflow_result
+        finally:
+            self._job_output_broadcaster.unregister_job(plan.workflow_id)
+            try:
+                self._output_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+            self._try_start_next_queued()
 
     async def _background_execute(
         self,
@@ -4616,116 +5460,26 @@ class RequestHandler:
         Returns:
             RunResult from the execution pipeline.
         """
-        loop = asyncio.get_running_loop()
-
-        def _on_output(line: str) -> None:
-            """Bridge thread-based SSH output back onto the event loop."""
-            loop.call_soon_threadsafe(
-                functools.partial(
-                    self._publish_live_output_line,
-                    run_id,
-                    line,
-                )
-            )
-
-        try:
-            result = await execute_run(
-                target_host=target_host,
-                target_user=target_user,
-                command=command,
-                target_port=target_port,
-                wiki_root=self._config.wiki_root,
-                timeout=timeout,
-                on_output=_on_output,
-                run_id=run_id,
-            )
-            await asyncio.sleep(0)
-            # Set _last_completed_run IMMEDIATELY after execute_run
-            # returns to avoid a race window where status sees no active
-            # run state. The audit/summary work below can take a few
-            # hundred ms (LLM calls), so users typing 'status' during
-            # that window would otherwise see "[ok]" instead of [COMPLETED].
-            self._last_completed_run = result
-            logger.info(
-                "Background run completed: run_id=%s success=%s",
-                result.run_id,
-                result.success,
-            )
-
-            # If the run failed, push an error notification into the
-            # output queue so any active watchers see it. Also store
-            # the failure summary so the next CLI session can display it.
-            if not result.success:
-                error_summary = (
-                    f"\n!!! RUN FAILED !!!\n"
-                    f"Run ID: {result.run_id}\n"
-                    f"Command: {command}\n"
-                    f"Exit code: {result.exit_code}\n"
-                )
-                if result.error:
-                    error_summary += f"Error: {result.error}\n"
-                if result.stderr:
-                    error_summary += f"Stderr:\n{result.stderr[:1000]}\n"
-                self._publish_live_output_line(
-                    run_id,
-                    error_summary,
-                    dispatch_monitor_alerts=False,
-                )
-                # Persist the last failure so the CLI sees it on reconnect
-                self._last_failure = error_summary
-                logger.warning(
-                    "Run %s failed with exit_code=%s",
-                    result.run_id,
-                    result.exit_code,
-                )
-        except Exception as exc:
-            logger.error(
-                "Background run failed with unexpected error: %s",
-                exc,
-                exc_info=True,
-            )
-            # Write FAILED state to wiki so status can report it
-            try:
-                from jules_daemon.wiki.models import (
-                    Command as WikiCommand,
-                    CurrentRun,
-                    ProcessIDs,
-                    RunStatus,
-                    SSHTarget,
-                )
-                import os
-
-                failed_run = CurrentRun(
-                    status=RunStatus.FAILED,
-                    run_id=run_id,
-                    ssh_target=SSHTarget(
-                        host=target_host,
-                        user=target_user,
-                        port=target_port,
-                    ),
-                    command=WikiCommand(
-                        natural_language=command,
-                        resolved_shell=command,
-                    ),
-                    pids=ProcessIDs(daemon=os.getpid()),
-                    error=str(exc),
-                )
-                current_run_io.write(self._config.wiki_root, failed_run)
-            except Exception as wiki_exc:
-                logger.error(
-                    "Failed to write FAILED state to wiki: %s",
-                    wiki_exc,
-                )
-
-            # Build a failed result rather than propagating the exception
-            result = RunResult(
-                success=False,
-                run_id=run_id,
-                command=command,
-                target_host=target_host,
-                target_user=target_user,
-                error=str(exc),
-            )
+        result = await self._execute_run_once(
+            run_id=run_id,
+            stream_run_id=run_id,
+            target_host=target_host,
+            target_user=target_user,
+            command=command,
+            target_port=target_port,
+            timeout=timeout,
+        )
+        # Set _last_completed_run IMMEDIATELY after execute_run
+        # returns to avoid a race window where status sees no active
+        # run state. The audit/summary work below can take a few
+        # hundred ms (LLM calls), so users typing 'status' during
+        # that window would otherwise see "[ok]" instead of [COMPLETED].
+        self._last_completed_run = result
+        logger.info(
+            "Background run completed: run_id=%s success=%s",
+            result.run_id,
+            result.success,
+        )
 
         self._record_completed_workflow(result)
 
@@ -5405,9 +6159,14 @@ class RequestHandler:
                 ),
             )
             extra.update(
-                self._build_status_alert_enrichment(run_id=wiki_run.run_id)
+                self._build_status_alert_enrichment(
+                    run_id=self._current_workflow_id or wiki_run.run_id
+                )
             )
-            self._attach_workflow_status(extra, workflow_id=wiki_run.run_id)
+            self._attach_workflow_status(
+                extra,
+                workflow_id=self._current_workflow_id or wiki_run.run_id,
+            )
 
             return _build_success_response(
                 msg_id=msg_id,
@@ -5457,9 +6216,14 @@ class RequestHandler:
                 ),
             )
             extra.update(
-                self._build_status_alert_enrichment(run_id=wiki_run.run_id)
+                self._build_status_alert_enrichment(
+                    run_id=self._current_workflow_id or wiki_run.run_id
+                )
             )
-            self._attach_workflow_status(extra, workflow_id=wiki_run.run_id)
+            self._attach_workflow_status(
+                extra,
+                workflow_id=self._current_workflow_id or wiki_run.run_id,
+            )
 
             return _build_success_response(
                 msg_id=msg_id,
@@ -5673,6 +6437,7 @@ class RequestHandler:
             )
 
         cancelled_run_id = self._current_run_id or ""
+        cancelled_workflow_id = self._current_workflow_id or cancelled_run_id
 
         # Cancel the asyncio task
         self._current_task.cancel()
@@ -5692,12 +6457,13 @@ class RequestHandler:
                 "Failed to update wiki state to CANCELLED: %s", exc,
             )
 
-        if cancelled_run_id:
-            self._record_cancelled_workflow(cancelled_run_id)
+        if cancelled_workflow_id:
+            self._record_cancelled_workflow(cancelled_workflow_id)
 
         # Clear internal references
         self._current_task = None
         self._current_run_id = None
+        self._current_workflow_id = None
 
         logger.info("Cancelled run run_id=%s", cancelled_run_id)
 
@@ -5707,7 +6473,7 @@ class RequestHandler:
             extra={
                 "status": "cancelled",
                 "run_id": cancelled_run_id,
-                "workflow_id": cancelled_run_id,
+                "workflow_id": cancelled_workflow_id,
             },
         )
 

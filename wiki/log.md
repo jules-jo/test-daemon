@@ -66,3 +66,6 @@ Extended `TestKnowledge` with workflow-specific fields such as `workflow_steps`,
 
 ## [2026-04-16] implementation | Wired workflow preflight into the active run path
 Natural-language runs now resolve workflow-aware test knowledge before the agent loop, probe explicit remote artifact paths over SSH when possible, ask a deterministic preflight question when artifacts are missing or unverifiable, and carry the resulting workflow context into the agent loop system prompt plus the persisted workflow record. Updated the workflow implementation-plan and schema pages to reflect the new current state and remaining gap around automatic multi-step advancement.
+
+## [2026-04-16] implementation | Added the first sequential workflow runner
+When workflow preflight says prerequisite steps should run first, Jules can now resolve those workflow steps into concrete test specs, collect any missing step arguments up front, ask for explicit approval per step command, and execute the approved steps sequentially in one background workflow task. Workflow status now persists multiple step records for the same workflow instead of only a single `primary-run` step, and the implementation-plan page now records that automatic `prerequisite -> main step` advancement is live in the first deterministic slice.
