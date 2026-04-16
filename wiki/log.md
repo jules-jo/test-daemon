@@ -75,3 +75,6 @@ Sequential workflow steps now persist a generic parser-backed `parsed_status`, a
 
 ## [2026-04-16] implementation | Made daemon-side interpret chat-first for informational prompts
 The active `interpret` path now answers non-action prompts directly from daemon context, workflow state, and matching test knowledge instead of forcing every conversational input through verb classification and clarification. Action-like prompts still use daemon-side LLM intent interpretation plus deterministic validation/dispatch, so Jules is closer to a chat-style interface without giving up the existing execution safety boundaries.
+
+## [2026-04-16] implementation | Added Copilot SDK frontend and Jules MCP runtime scaffold
+Added a first MCP adapter in `src/jules_daemon/mcp_server.py` plus a `jules-mcp` entrypoint so external agent frontends can talk to the existing daemon/runtime through MCP. Added `copilot-sdk-frontend/` as a minimal interactive GitHub Copilot SDK scaffold that uses Jules MCP tools for chat/status/history/health/cancel operations. This slice is intentionally read/control-first; execution/approval bridging over MCP is still deferred.

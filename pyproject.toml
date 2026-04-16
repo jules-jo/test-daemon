@@ -13,6 +13,7 @@ dependencies = [
     "pydantic>=2.7",
     "paramiko>=3.0",
     "python-dotenv>=1.0",
+    "mcp>=1.27.0",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +27,7 @@ dev = [
 jules-daemon = "jules_daemon.__main__:main"
 jules = "jules_daemon.cli_main:main"
 jules-demo = "jules_daemon.demo_runner:main"
+jules-mcp = "jules_daemon.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jules_daemon"]

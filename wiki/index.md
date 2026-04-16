@@ -37,6 +37,10 @@ Content-oriented catalog for the repo-local codebase wiki and the daemon's runti
 - [Project Wiki System](pages/concepts/project-wiki-system.md) -- local adaptation of the Karpathy LLM Wiki pattern for this repository
 - [Workflow-Aware Test Knowledge Schema](pages/concepts/workflow-aware-test-knowledge-schema.md) -- exact frontmatter fields and example markdown for prerequisite-aware test knowledge pages
 
+## Tools And SDKs
+
+- [Copilot SDK Frontend And Jules MCP Runtime](pages/tools-and-sdks/copilot-sdk-frontend-and-jules-mcp-runtime.md) -- staged architecture for using GitHub Copilot SDK as the chat/session frontend while Jules remains the daemon-backed MCP runtime
+
 ## Daemon-Managed Directories
 
 These directories are automatically managed by the daemon.

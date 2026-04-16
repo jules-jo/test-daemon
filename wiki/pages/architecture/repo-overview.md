@@ -80,6 +80,7 @@ The main daemon lifecycle starts in `src/jules_daemon/__main__.py`. It initializ
 - The active natural-language run path now uses that workflow-aware knowledge before entering the agent loop: Jules can match a test spec, probe explicit remote artifact paths, ask the user whether to run prerequisite steps first when artifacts are missing or unverifiable, and inject that preflight context into the agent loop and persisted workflow record.
 - When the user approves prerequisite execution, the active run path can now bypass the agent loop and use a deterministic background workflow runner: Jules resolves each workflow step to test knowledge, collects any missing step arguments up front, asks for explicit approval per step command, then executes the approved steps sequentially while persisting workflow-step state.
 - Workflow steps now have a generic interpreter layer and persisted `parsed_status`, so sequential workflows can expose parsed per-step progress through `status` and emit step-transition alerts through the notification broadcaster while the workflow is running.
+- A new integration direction is now scaffolded under `src/jules_daemon/mcp_server.py` and `copilot-sdk-frontend/`: Copilot SDK is intended to become the chat/session frontend while Jules remains the backend runtime exposed through a local MCP adapter.
 
 ## Current Snapshot
 

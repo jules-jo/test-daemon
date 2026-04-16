@@ -1,0 +1,13 @@
+{
+  "name": "jules-copilot-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "GitHub Copilot SDK frontend for Jules via MCP",
+  "scripts": {
+    "start": "node src/chat.mjs"
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "^0.2.2"
+  }
+}
