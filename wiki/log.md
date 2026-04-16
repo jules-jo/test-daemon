@@ -54,3 +54,6 @@ Added `wiki/pages/architecture/stateful-test-workflow-orchestration.md` to captu
 
 ## [2026-04-16] design | Clarified that workflow orchestration is generic, not LT-specific
 Updated `wiki/pages/architecture/stateful-test-workflow-orchestration.md` to make the intended scope explicit: LT is just one motivating example, while the actual architecture should support many different sequential test workflows through generic workflow templates, test knowledge, artifact checks, and step-specific parsers.
+
+## [2026-04-16] planning | Added concrete implementation plan for stateful test workflows
+Added `wiki/pages/architecture/stateful-test-workflow-implementation-plan.md` to convert the workflow architecture note into an executable plan. The new page defines the core records, services, tool/runtime primitives, suggested module boundaries, knowledge-schema additions, phased delivery sequence, and acceptance scenarios for generic prerequisite-aware test workflows.

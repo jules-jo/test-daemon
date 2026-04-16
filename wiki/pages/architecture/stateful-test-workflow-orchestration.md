@@ -372,6 +372,12 @@ The design target should be phrased as:
 - the orchestration engine is generic
 - the LT example is one acceptance scenario, not the definition of the product
 
+## Related
+
+- [Stateful Test Workflow Implementation Plan](stateful-test-workflow-implementation-plan.md)
+- [Agent-Driven Request Interpretation](agent-driven-request-interpretation.md)
+- [Repo Overview](repo-overview.md)
+
 ## Implications For A More Model-Centric Jules
 
 If Jules becomes more model-centric or even daemonless, this workflow should be one of the acceptance targets.

@@ -75,6 +75,7 @@ The main daemon lifecycle starts in `src/jules_daemon/__main__.py`. It initializ
 - Active-run watch/status/live-output paths now prefer `JobOutputBroadcaster` and default monitor detectors in `RequestHandler`; the older in-memory buffer/queue path remains as a fallback for completed runs and legacy watch behavior.
 - Current request interpretation is still front-door-heavy in the CLI. A planned design direction is to keep only a thin deterministic front door and move unresolved conversational run interpretation deeper into the daemon/agent loop while preserving deterministic target validation and approval enforcement.
 - A newer design direction is to model multi-step test workflows explicitly, so Jules can reason about prerequisites such as calibration, answer status queries mid-run, and summarize composite workflows rather than only single commands.
+- That workflow direction now has a concrete implementation-plan page describing the proposed records, services, tool primitives, and staged rollout for generic multi-step test execution.
 
 ## Current Snapshot
 
@@ -96,4 +97,5 @@ The main daemon lifecycle starts in `src/jules_daemon/__main__.py`. It initializ
 - [Phase 2.5 Implementation Backlog](phase-2-5-implementation-backlog.md)
 - [Agent-Driven Request Interpretation](agent-driven-request-interpretation.md)
 - [Stateful Test Workflow Orchestration](stateful-test-workflow-orchestration.md)
+- [Stateful Test Workflow Implementation Plan](stateful-test-workflow-implementation-plan.md)
 - [Project Wiki System](../concepts/project-wiki-system.md)
