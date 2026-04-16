@@ -155,11 +155,26 @@ from jules_daemon.execution.test_discovery import (
 from jules_daemon.wiki.test_knowledge import (
     TestKnowledge,
     derive_test_slug,
+    find_matching_test_knowledge,
     load_test_knowledge,
     merge_knowledge,
     save_test_knowledge,
 )
-from jules_daemon.workflows.models import WorkflowRecord, WorkflowStepRecord
+from jules_daemon.workflows.models import (
+    ArtifactState,
+    WorkflowRecord,
+    WorkflowStepRecord,
+)
+from jules_daemon.workflows.planner import (
+    TestWorkflowPlan,
+    WorkflowPreflightDecision,
+    evaluate_workflow_preflight,
+    resolve_test_workflow,
+)
+from jules_daemon.workflows.preflight import (
+    artifact_presence_from_states,
+    inspect_workflow_artifacts,
+)
 from jules_daemon.workflows.status import (
     build_latest_workflow_status,
     build_workflow_status,
@@ -1773,6 +1788,208 @@ class RequestHandler:
 
         return parsed
 
+    @staticmethod
+    def _parse_yes_no_answer(answer: str) -> bool | None:
+        """Interpret a short free-form answer as yes / no / unknown."""
+        normalized = " ".join(answer.strip().lower().split())
+        if not normalized:
+            return None
+
+        if normalized in {"y", "yes", "yeah", "yep"}:
+            return True
+        if normalized in {"n", "no", "nope", "nah"}:
+            return False
+
+        yes_prefixes = (
+            "sure",
+            "ok",
+            "okay",
+            "go ahead",
+            "please do",
+            "do it",
+            "run it",
+            "run calibration",
+            "run precheck",
+            "approve",
+        )
+        no_prefixes = (
+            "skip",
+            "dont",
+            "don't",
+            "do not",
+            "continue anyway",
+            "not now",
+        )
+
+        if any(normalized.startswith(prefix) for prefix in yes_prefixes):
+            return True
+        if any(normalized.startswith(prefix) for prefix in no_prefixes):
+            return False
+        return None
+
+    async def _ask_yes_no_question(
+        self,
+        *,
+        client: ClientConnection,
+        question: str,
+        context: str,
+    ) -> bool | None:
+        """Ask a workflow yes/no question, retrying once on ambiguity."""
+        from jules_daemon.agent.ipc_bridge import make_ask_callback
+
+        ask_cb = make_ask_callback(client)
+        answer = await ask_cb(question, context)
+        if answer is None:
+            return None
+        decision = self._parse_yes_no_answer(answer)
+        if decision is not None:
+            return decision
+
+        retry = await ask_cb(
+            "Please answer yes or no.",
+            context,
+        )
+        if retry is None:
+            return None
+        return self._parse_yes_no_answer(retry)
+
+    @staticmethod
+    def _artifact_states_payload(
+        artifact_states: tuple[ArtifactState, ...],
+    ) -> list[dict[str, Any]]:
+        """Serialize artifact states into a JSON-friendly payload."""
+        return [
+            {
+                "name": artifact.name,
+                "status": artifact.status.value,
+                "details": artifact.details,
+                "checked_at": artifact.checked_at.isoformat(),
+            }
+            for artifact in artifact_states
+        ]
+
+    def _build_workflow_context_payload(
+        self,
+        *,
+        knowledge: TestKnowledge,
+        plan: TestWorkflowPlan,
+        decision: WorkflowPreflightDecision,
+        artifact_states: tuple[ArtifactState, ...],
+        user_decision: str,
+    ) -> dict[str, Any]:
+        """Build agent-facing workflow context from preflight results."""
+        return {
+            "matched_test_slug": knowledge.test_slug,
+            "command_pattern": knowledge.command_pattern,
+            "test_file_path": knowledge.test_file_path,
+            "workflow_steps": [step.name for step in plan.workflow_steps],
+            "prerequisite_steps": [
+                step.name for step in plan.prerequisite_steps
+            ],
+            "main_steps": [step.name for step in plan.main_steps],
+            "artifact_states": self._artifact_states_payload(artifact_states),
+            "success_criteria": plan.success_criteria,
+            "failure_criteria": plan.failure_criteria,
+            "notes": list(plan.notes) + list(decision.notes),
+            "preflight": {
+                "ready_to_run": decision.ready_to_run,
+                "requires_user_confirmation": (
+                    decision.requires_user_confirmation
+                ),
+                "missing_artifacts": list(decision.missing_artifacts),
+                "unknown_artifacts": list(decision.unknown_artifacts),
+                "question": (
+                    decision.question.prompt
+                    if decision.question is not None
+                    else ""
+                ),
+                "user_decision": user_decision,
+                "should_run_prerequisites": (
+                    user_decision == "approved_prerequisites"
+                    and bool(plan.prerequisite_steps)
+                ),
+            },
+        }
+
+    async def _prepare_workflow_run_context(
+        self,
+        *,
+        parsed: dict[str, Any],
+        client: ClientConnection,
+    ) -> dict[str, Any] | str:
+        """Augment a run request with workflow-aware preflight context."""
+        natural_language = str(parsed.get("natural_language", "")).strip()
+        target_host = str(parsed.get("target_host", "")).strip()
+        target_user = str(parsed.get("target_user", "")).strip()
+        target_port = int(parsed.get("target_port", 22))
+        if not natural_language or not target_host or not target_user:
+            return parsed
+
+        knowledge, _matched_slug = await self._run_blocking(
+            find_matching_test_knowledge,
+            self._config.wiki_root,
+            natural_language,
+        )
+        if knowledge is None:
+            return parsed
+
+        has_workflow_metadata = any((
+            knowledge.workflow_steps,
+            knowledge.prerequisites,
+            knowledge.artifact_requirements,
+            knowledge.success_criteria,
+            knowledge.failure_criteria,
+        ))
+        if not has_workflow_metadata:
+            return parsed
+
+        plan = resolve_test_workflow(
+            request_text=natural_language,
+            knowledge=knowledge,
+        )
+        artifact_states: tuple[ArtifactState, ...] = ()
+        if plan.artifact_requirements:
+            artifact_states = await inspect_workflow_artifacts(
+                host=target_host,
+                port=target_port,
+                username=target_user,
+                artifact_requirements=plan.artifact_requirements,
+            )
+        decision = evaluate_workflow_preflight(
+            plan=plan,
+            artifact_presence=artifact_presence_from_states(artifact_states),
+        )
+
+        user_decision = "not_needed"
+        if decision.requires_user_confirmation and decision.question is not None:
+            answered_yes = await self._ask_yes_no_question(
+                client=client,
+                question=decision.question.prompt,
+                context=(
+                    "Workflow preflight detected prerequisite test knowledge. "
+                    "Answer yes to let Jules run prerequisite steps first, "
+                    "or no to continue without them."
+                ),
+            )
+            if answered_yes is None:
+                return "Run cancelled."
+            user_decision = (
+                "approved_prerequisites"
+                if answered_yes
+                else "declined_prerequisites"
+            )
+
+        enriched = dict(parsed)
+        enriched["workflow_context"] = self._build_workflow_context_payload(
+            knowledge=knowledge,
+            plan=plan,
+            decision=decision,
+            artifact_states=artifact_states,
+            user_decision=user_decision,
+        )
+        enriched["_workflow_artifact_states"] = artifact_states
+        return enriched
+
     def _infer_named_system_from_request(
         self,
         parsed: dict[str, Any],
@@ -2431,6 +2648,19 @@ class RequestHandler:
                 msg_id, parsed, client, detection=detection,
             )
 
+        if self._can_use_agent_loop:
+            workflow_prepared = await self._prepare_workflow_run_context(
+                parsed=parsed,
+                client=client,
+            )
+            if isinstance(workflow_prepared, str):
+                return _build_error_response(
+                    msg_id=msg_id,
+                    error_summary=workflow_prepared,
+                    validation_errors=[],
+                )
+            parsed = workflow_prepared
+
         # NL commands: try agent loop first if available
         if self._can_use_agent_loop:
             try:
@@ -2534,6 +2764,8 @@ class RequestHandler:
         agent_original_user_input = str(
             parsed.get("agent_original_user_input", "")
         ).strip()
+        workflow_context = parsed.get("workflow_context")
+        workflow_artifact_states = parsed.get("_workflow_artifact_states", ())
         target_host = parsed.get("target_host", "")
         target_user = parsed.get("target_user", "")
         target_port = parsed.get("target_port", 22)
@@ -2582,6 +2814,11 @@ class RequestHandler:
                 target_port=target_port,
                 timeout=timeout,
                 workflow_request=natural_language,
+                artifact_states=(
+                    workflow_artifact_states
+                    if isinstance(workflow_artifact_states, tuple)
+                    else ()
+                ),
             )
 
         def _live_output_provider(last_n: int) -> dict[str, Any]:
@@ -2627,6 +2864,11 @@ class RequestHandler:
             target_host=target_host,
             target_user=target_user,
             target_port=target_port,
+            workflow_context=(
+                workflow_context
+                if isinstance(workflow_context, dict)
+                else None
+            ),
         )
 
         # Wrap registry in a dispatcher adapter that satisfies the
@@ -2864,12 +3106,80 @@ class RequestHandler:
 
         return "\n".join(parts) if parts else "Test completed."
 
+    def _format_workflow_context_for_agent(
+        self,
+        workflow_context: dict[str, Any],
+    ) -> str:
+        """Render workflow preflight context for the agent system prompt."""
+        lines: list[str] = []
+        matched_test_slug = str(
+            workflow_context.get("matched_test_slug", "")
+        ).strip()
+        if matched_test_slug:
+            lines.append(f"- Matched test spec: {matched_test_slug}")
+        test_file_path = str(workflow_context.get("test_file_path", "")).strip()
+        if test_file_path:
+            lines.append(f"- Test file path: {test_file_path}")
+
+        workflow_steps = workflow_context.get("workflow_steps", [])
+        if isinstance(workflow_steps, list) and workflow_steps:
+            lines.append("- Workflow steps: " + ", ".join(map(str, workflow_steps)))
+
+        prerequisite_steps = workflow_context.get("prerequisite_steps", [])
+        if isinstance(prerequisite_steps, list) and prerequisite_steps:
+            lines.append(
+                "- Prerequisite steps: "
+                + ", ".join(map(str, prerequisite_steps))
+            )
+
+        artifact_states = workflow_context.get("artifact_states", [])
+        if isinstance(artifact_states, list) and artifact_states:
+            lines.append("- Artifact states:")
+            for item in artifact_states:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).strip()
+                status = str(item.get("status", "")).strip()
+                details = str(item.get("details", "")).strip()
+                if not name:
+                    continue
+                suffix = f" -- {details}" if details else ""
+                lines.append(f"  - {name}: {status}{suffix}")
+
+        preflight = workflow_context.get("preflight", {})
+        if isinstance(preflight, dict):
+            user_decision = str(preflight.get("user_decision", "")).strip()
+            if user_decision:
+                lines.append(f"- Preflight user decision: {user_decision}")
+            if preflight.get("should_run_prerequisites") is True:
+                lines.append(
+                    "- The user approved running prerequisite steps before the main step."
+                )
+            elif user_decision == "declined_prerequisites":
+                lines.append(
+                    "- The user declined automatic prerequisite execution."
+                )
+
+        success_criteria = str(
+            workflow_context.get("success_criteria", "")
+        ).strip()
+        if success_criteria:
+            lines.append(f"- Success criteria: {success_criteria}")
+        failure_criteria = str(
+            workflow_context.get("failure_criteria", "")
+        ).strip()
+        if failure_criteria:
+            lines.append(f"- Failure criteria: {failure_criteria}")
+
+        return "\n".join(lines)
+
     def _build_agent_system_prompt(
         self,
         *,
         target_host: str,
         target_user: str,
         target_port: int,
+        workflow_context: dict[str, Any] | None = None,
     ) -> str:
         """Build the system prompt for the agent loop.
 
@@ -2884,6 +3194,8 @@ class RequestHandler:
             target_host: Remote hostname or IP address.
             target_user: SSH username.
             target_port: SSH port number.
+            workflow_context: Optional preflight workflow context already
+                resolved by the daemon.
 
         Returns:
             The system prompt string.
@@ -2892,6 +3204,11 @@ class RequestHandler:
             target_host=target_host,
         )
         wiki_block = "\n".join(wiki_context_lines) if wiki_context_lines else ""
+        workflow_block = (
+            self._format_workflow_context_for_agent(workflow_context)
+            if workflow_context
+            else ""
+        )
 
         prompt_parts: list[str] = [
             "You are Jules, an SSH test runner assistant. You help users "
@@ -2939,12 +3256,25 @@ class RequestHandler:
             "'in tuto' or 'in system tuto', treat that as transport "
             "metadata that has already been handled. Do NOT ask the user "
             "what a resolved system alias means.",
+            "- If workflow preflight says prerequisite steps should run "
+            "first and the user approved that, look up those prerequisite "
+            "step specs and run them before the main test.",
+            "- If workflow preflight says the user declined automatic "
+            "prerequisite execution, do NOT run prerequisite steps unless "
+            "the user later changes their mind.",
             "- If the user seems to have provided an argument, but the "
             "argument name or value looks malformed, misspelled, ambiguous, "
             "or inconsistent with the test spec, call ask_user_question to "
             "clarify it instead of silently coercing it.",
             "- NEVER auto-default or guess required arguments. ALWAYS ask.",
         ]
+
+        if workflow_block:
+            prompt_parts.extend([
+                "",
+                "## Workflow Preflight",
+                workflow_block,
+            ])
 
         if wiki_block:
             prompt_parts.extend([
@@ -3566,6 +3896,7 @@ class RequestHandler:
         run_id: str | None = None,
         audit: AuditRecord | None = None,
         workflow_request: str | None = None,
+        artifact_states: tuple[ArtifactState, ...] = (),
     ) -> dict[str, Any]:
         """Start a daemon-managed background run and return its start payload."""
         current_task = asyncio.current_task()
@@ -3593,6 +3924,7 @@ class RequestHandler:
             target_host=target_host,
             target_user=target_user,
             command=command,
+            artifact_states=artifact_states,
         )
         self._current_task = asyncio.create_task(
             self._background_execute(
@@ -4083,6 +4415,7 @@ class RequestHandler:
         target_host: str,
         target_user: str,
         command: str,
+        artifact_states: tuple[ArtifactState, ...] = (),
     ) -> None:
         """Persist the initial running workflow + primary step snapshot."""
         try:
@@ -4097,6 +4430,7 @@ class RequestHandler:
                 run_id=run_id,
                 target_host=target_host,
                 target_user=target_user,
+                artifact_states=artifact_states,
             )
             step = read_workflow_step(
                 self._config.wiki_root,

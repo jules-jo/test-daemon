@@ -77,6 +77,7 @@ The main daemon lifecycle starts in `src/jules_daemon/__main__.py`. It initializ
 - A newer design direction is to model multi-step test workflows explicitly, so Jules can reason about prerequisites such as calibration, answer status queries mid-run, and summarize composite workflows rather than only single commands.
 - That workflow direction now has a concrete implementation-plan page describing the proposed records, services, tool primitives, and staged rollout for generic multi-step test execution.
 - The current codebase now also supports workflow-aware test-knowledge fields such as `workflow_steps`, `prerequisites`, `artifact_requirements`, and `when_missing_artifact_ask`, plus a first deterministic planner/preflight layer under `src/jules_daemon/workflows/planner.py`.
+- The active natural-language run path now uses that workflow-aware knowledge before entering the agent loop: Jules can match a test spec, probe explicit remote artifact paths, ask the user whether to run prerequisite steps first when artifacts are missing or unverifiable, and inject that preflight context into the agent loop and persisted workflow record.
 
 ## Current Snapshot
 

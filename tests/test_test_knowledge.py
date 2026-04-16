@@ -19,6 +19,7 @@ from jules_daemon.wiki.test_knowledge import (
     KNOWLEDGE_DIR,
     TestKnowledge,
     derive_test_slug,
+    find_matching_test_knowledge,
     knowledge_file_path,
     load_test_knowledge,
     merge_knowledge,
@@ -177,6 +178,40 @@ class TestDeriveTestSlug:
     def test_npx_runner(self) -> None:
         slug = derive_test_slug("npx jest --watch")
         assert "jest" in slug or slug == "npx"
+
+
+class TestFindMatchingTestKnowledge:
+    """Free-form catalog matching should find the intended spec."""
+
+    def test_prefers_specific_step_spec_for_free_form_query(
+        self,
+        wiki_root: Path,
+    ) -> None:
+        save_test_knowledge(
+            wiki_root,
+            _make_knowledge(
+                test_slug="step",
+                command_pattern="python3 /root/step.py --target {target}",
+                purpose="Runs the step test.",
+            ),
+        )
+        save_test_knowledge(
+            wiki_root,
+            _make_knowledge(
+                test_slug="other-test",
+                command_pattern="python3 /root/other.py --name {name}",
+                purpose="Runs a different test family.",
+            ),
+        )
+
+        knowledge, matched_slug = find_matching_test_knowledge(
+            wiki_root,
+            "run the step test",
+        )
+
+        assert knowledge is not None
+        assert matched_slug == "step"
+        assert knowledge.test_slug == "step"
 
     def test_node_interpreter_stripped(self) -> None:
         slug = derive_test_slug("node tests/run.js")

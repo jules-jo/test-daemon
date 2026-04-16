@@ -45,28 +45,6 @@ __all__ = ["LookupTestSpecTool"]
 
 logger = logging.getLogger(__name__)
 
-_QUERY_STOPWORDS: frozenset[str] = frozenset({
-    "a",
-    "an",
-    "about",
-    "can",
-    "current",
-    "file",
-    "for",
-    "give",
-    "learn",
-    "me",
-    "please",
-    "run",
-    "script",
-    "show",
-    "status",
-    "test",
-    "tests",
-    "the",
-    "this",
-})
-
 
 class LookupTestSpecTool(InfoRetrievalTool):
     """Look up a test specification from the wiki test catalog.
@@ -235,112 +213,18 @@ class LookupTestSpecTool(InfoRetrievalTool):
         2. Simple slugify of the test name (handles "ld test" -> "ld-test")
         3. Glob search for partial matches in the knowledge directory
         """
-        import re
         from jules_daemon.wiki.test_knowledge import (
-            KNOWLEDGE_DIR,
             derive_test_slug,
-            load_test_knowledge,
+            find_matching_test_knowledge,
         )
 
-        def _normalize_text(value: str) -> str:
-            return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", value.lower())).strip()
-
-        def _meaningful_tokens(value: str) -> list[str]:
-            normalized = _normalize_text(value)
-            return [
-                token
-                for token in normalized.split()
-                if len(token) >= 2
-                and token not in _QUERY_STOPWORDS
-                and not token.isdigit()
-            ]
-
-        # Strategy 1: derive_test_slug (best for command-style input)
         slug = derive_test_slug(test_name)
-        knowledge = load_test_knowledge(self._wiki_root, slug)
-
-        # Strategy 2: simple slugify (best for test names like "ld test")
-        if knowledge is None:
-            simple_slug = re.sub(r"[^a-z0-9]+", "-", test_name.lower()).strip("-")
-            if simple_slug and simple_slug != slug:
-                knowledge = load_test_knowledge(self._wiki_root, simple_slug)
-                if knowledge is not None:
-                    slug = simple_slug
-
-        # Strategy 3: scan all spec files and match against frontmatter
-        # fields: name, test_slug, command_template
-        if knowledge is None:
-            knowledge_dir = self._wiki_root / KNOWLEDGE_DIR
-            if knowledge_dir.is_dir():
-                search_normalized = _normalize_text(test_name)
-                search_tokens = _meaningful_tokens(test_name)
-                search_phrase = " ".join(search_tokens)
-                best_match: tuple[int, str] | None = None
-
-                for md_file in sorted(knowledge_dir.glob("test-*.md")):
-                    try:
-                        from jules_daemon.wiki import frontmatter
-                        raw = md_file.read_text(encoding="utf-8")
-                        doc = frontmatter.parse(raw)
-                        fm = doc.frontmatter
-
-                        # Score exact/near matches above loose token matches.
-                        fm_name = _normalize_text(str(fm.get("name", "")))
-                        fm_slug = _normalize_text(str(fm.get("test_slug", "")))
-                        fm_cmd = _normalize_text(
-                            str(fm.get("command_pattern") or fm.get("command_template", ""))
-                        )
-                        field_scores = [
-                            (fm_name, 4),
-                            (fm_slug, 3),
-                            (fm_cmd, 1),
-                        ]
-
-                        score = 0
-                        for field_value, field_weight in field_scores:
-                            if not field_value:
-                                continue
-                            if search_phrase and search_phrase == field_value:
-                                score = max(score, 100 + field_weight)
-                            elif search_normalized and search_normalized == field_value:
-                                score = max(score, 95 + field_weight)
-                            elif search_phrase and search_phrase in field_value:
-                                score = max(score, 80 + field_weight)
-                            elif search_tokens and all(token in field_value for token in search_tokens):
-                                score = max(score, 70 + field_weight)
-                            elif search_tokens:
-                                exact_token_hits = sum(
-                                    1
-                                    for token in search_tokens
-                                    if token in field_value.split()
-                                )
-                                partial_token_hits = sum(
-                                    1
-                                    for token in search_tokens
-                                    if token in field_value
-                                )
-                                if exact_token_hits > 0 or partial_token_hits > 0:
-                                    score = max(
-                                        score,
-                                        exact_token_hits * 15
-                                        + partial_token_hits * 5
-                                        + field_weight,
-                                    )
-
-                        if score <= 0:
-                            continue
-
-                        match_slug = md_file.stem.removeprefix("test-")
-                        if best_match is None or score > best_match[0]:
-                            best_match = (score, match_slug)
-                    except Exception:
-                        continue
-
-                if best_match is not None:
-                    match_slug = best_match[1]
-                    knowledge = load_test_knowledge(self._wiki_root, match_slug)
-                    if knowledge is not None:
-                        slug = match_slug
+        knowledge, matched_slug = find_matching_test_knowledge(
+            self._wiki_root,
+            test_name,
+        )
+        if matched_slug:
+            slug = matched_slug
 
         if knowledge is None:
             return {

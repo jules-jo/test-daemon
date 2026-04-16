@@ -105,6 +105,7 @@ class WorkflowPreflightDecision:
     """Deterministic decision about whether a plan is ready to run."""
 
     missing_artifacts: tuple[str, ...] = ()
+    unknown_artifacts: tuple[str, ...] = ()
     ready_to_run: bool = True
     requires_user_confirmation: bool = False
     question: WorkflowQuestion | None = None
@@ -114,50 +115,80 @@ class WorkflowPreflightDecision:
 def evaluate_workflow_preflight(
     *,
     plan: TestWorkflowPlan,
-    artifact_presence: Mapping[str, bool],
+    artifact_presence: Mapping[str, bool | None],
 ) -> WorkflowPreflightDecision:
     """Evaluate artifact requirements for a workflow plan.
 
     This is intentionally deterministic. Remote artifact probing can be
     layered on later; this function only interprets the presence map.
     """
-    missing = tuple(
-        artifact_name
-        for artifact_name in plan.artifact_requirements
-        if not artifact_presence.get(artifact_name, False)
-    )
-    if not missing:
+    missing: list[str] = []
+    unknown: list[str] = []
+    for artifact_name in plan.artifact_requirements:
+        presence = artifact_presence.get(artifact_name)
+        if presence is True:
+            continue
+        if presence is False:
+            missing.append(artifact_name)
+            continue
+        unknown.append(artifact_name)
+
+    if not missing and not unknown:
         return WorkflowPreflightDecision(
             missing_artifacts=(),
+            unknown_artifacts=(),
             ready_to_run=True,
             requires_user_confirmation=False,
         )
 
-    if plan.when_missing_artifact_ask:
+    if missing and plan.when_missing_artifact_ask:
         prompt = plan.when_missing_artifact_ask
-    elif plan.prerequisite_steps:
+    elif missing and plan.prerequisite_steps:
         prereq_names = ", ".join(step.name for step in plan.prerequisite_steps)
         prompt = (
             "Required artifacts are missing: "
             + ", ".join(missing)
             + f". Do you want me to run {prereq_names} first?"
         )
-    else:
+    elif missing:
         prompt = (
             "Required artifacts are missing: "
             + ", ".join(missing)
             + ". Do you want me to continue anyway?"
         )
+    elif plan.prerequisite_steps:
+        prereq_names = ", ".join(step.name for step in plan.prerequisite_steps)
+        prompt = (
+            "Jules could not verify required artifacts automatically: "
+            + ", ".join(unknown)
+            + f". Do you want me to run {prereq_names} first?"
+        )
+    else:
+        prompt = (
+            "Jules could not verify required artifacts automatically: "
+            + ", ".join(unknown)
+            + ". Do you want me to continue anyway?"
+        )
 
     return WorkflowPreflightDecision(
-        missing_artifacts=missing,
+        missing_artifacts=tuple(missing),
+        unknown_artifacts=tuple(unknown),
         ready_to_run=False,
         requires_user_confirmation=True,
         question=WorkflowQuestion(
-            kind="missing_artifact",
+            kind="missing_artifact" if missing else "unverified_artifact",
             prompt=prompt,
         ),
         notes=(
-            "Preflight blocked on missing artifacts: " + ", ".join(missing),
+            (
+                "Preflight blocked on missing artifacts: "
+                + ", ".join(missing)
+            )
+            if missing
+            else (
+                "Preflight requires confirmation because artifacts "
+                "could not be verified automatically: "
+                + ", ".join(unknown)
+            ),
         ),
     )

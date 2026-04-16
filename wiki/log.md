@@ -63,3 +63,6 @@ Implemented the first workflow slice in code: new workflow models, a wiki-backed
 
 ## [2026-04-16] implementation | Added workflow-aware test knowledge schema and planner groundwork
 Extended `TestKnowledge` with workflow-specific fields such as `workflow_steps`, `prerequisites`, `artifact_requirements`, `when_missing_artifact_ask`, `success_criteria`, and `failure_criteria`. Added a deterministic workflow planner/preflight module, exposed the new fields through `lookup_test_spec`, `read_wiki`, and status test context, and documented the authoring format in `wiki/pages/concepts/workflow-aware-test-knowledge-schema.md`.
+
+## [2026-04-16] implementation | Wired workflow preflight into the active run path
+Natural-language runs now resolve workflow-aware test knowledge before the agent loop, probe explicit remote artifact paths over SSH when possible, ask a deterministic preflight question when artifacts are missing or unverifiable, and carry the resulting workflow context into the agent loop system prompt plus the persisted workflow record. Updated the workflow implementation-plan and schema pages to reflect the new current state and remaining gap around automatic multi-step advancement.

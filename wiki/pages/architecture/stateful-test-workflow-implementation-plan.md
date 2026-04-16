@@ -51,14 +51,17 @@ What exists now:
 - workflow-aware `status` output, including latest persisted workflow state
 - workflow-aware test-knowledge schema fields such as `workflow_steps`, `prerequisites`, and `artifact_requirements`
 - a first deterministic planner/preflight module in `src/jules_daemon/workflows/planner.py`
+- active NL run handling now resolves matching workflow-aware test knowledge before the agent loop
+- explicit path-like artifact requirements can now be checked remotely over SSH in `src/jules_daemon/workflows/preflight.py`
+- missing or unverifiable artifacts can now trigger a preflight user question before the agent loop starts
+- approved/declined preflight context is now carried into the agent loop system prompt and persisted on the started workflow record
 
 What still remains for later phases:
 
-- prerequisite-aware planning
-- artifact checks
 - multi-step advancement
 - step-specific interpreters
 - workflow-driven notifications
+- a runner that can automatically chain `prerequisite -> main step` after a background step finishes
 
 ## Scope
 

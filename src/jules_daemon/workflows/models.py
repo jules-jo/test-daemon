@@ -228,6 +228,7 @@ class WorkflowRecord:
         run_id: str | None = None,
         target_host: str | None = None,
         target_user: str | None = None,
+        artifact_states: tuple[ArtifactState, ...] | None = None,
     ) -> WorkflowRecord:
         """Transition the workflow to running."""
         return replace(
@@ -237,6 +238,11 @@ class WorkflowRecord:
             run_id=run_id if run_id is not None else self.run_id,
             target_host=target_host if target_host is not None else self.target_host,
             target_user=target_user if target_user is not None else self.target_user,
+            artifact_states=(
+                artifact_states
+                if artifact_states is not None
+                else self.artifact_states
+            ),
             started_at=self.started_at or _now_utc(),
             updated_at=_now_utc(),
             error=None,
@@ -304,4 +310,3 @@ class WorkflowRecord:
             completed_at=_now_utc(),
             updated_at=_now_utc(),
         )
-

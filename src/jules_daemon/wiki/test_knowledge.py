@@ -55,6 +55,7 @@ __all__ = [
     "TestKnowledge",
     "KNOWLEDGE_DIR",
     "derive_test_slug",
+    "find_matching_test_knowledge",
     "knowledge_file_path",
     "load_test_knowledge",
     "merge_knowledge",
@@ -112,6 +113,28 @@ _INTERPRETER_PREFIXES: frozenset[str] = frozenset({
     "zsh",
     "fish",
     "exec",
+})
+
+_QUERY_STOPWORDS: frozenset[str] = frozenset({
+    "a",
+    "an",
+    "about",
+    "can",
+    "current",
+    "file",
+    "for",
+    "give",
+    "learn",
+    "me",
+    "please",
+    "run",
+    "script",
+    "show",
+    "status",
+    "test",
+    "tests",
+    "the",
+    "this",
 })
 
 
@@ -764,6 +787,134 @@ def load_test_knowledge(
             exc,
         )
         return None
+
+
+def _normalize_search_text(value: str) -> str:
+    """Normalize free-form search text for fuzzy catalog matching."""
+    return re.sub(
+        r"\s+",
+        " ",
+        re.sub(r"[^a-z0-9]+", " ", value.lower()),
+    ).strip()
+
+
+def _meaningful_search_tokens(value: str) -> list[str]:
+    """Extract non-trivial tokens from a free-form search query."""
+    normalized = _normalize_search_text(value)
+    return [
+        token
+        for token in normalized.split()
+        if len(token) >= 2
+        and token not in _QUERY_STOPWORDS
+        and not token.isdigit()
+    ]
+
+
+def find_matching_test_knowledge(
+    wiki_root: Path,
+    query: str,
+) -> tuple[Optional[TestKnowledge], str]:
+    """Find the best matching knowledge entry for a free-form query.
+
+    Matching strategy:
+    1. Direct slug from :func:`derive_test_slug`
+    2. Simple slugified query
+    3. Fuzzy frontmatter scan over ``name``, ``test_slug``,
+       ``command_pattern`` / ``command_template``, and ``test_file_path``
+
+    Returns the matched knowledge entry plus the best slug candidate that
+    was tried. The slug is useful for not-found responses and diagnostics.
+    """
+    query = query.strip()
+    if not query:
+        return None, ""
+
+    slug = derive_test_slug(query)
+    knowledge = load_test_knowledge(wiki_root, slug)
+    if knowledge is not None:
+        return knowledge, slug
+
+    simple_slug = re.sub(r"[^a-z0-9]+", "-", query.lower()).strip("-")
+    if simple_slug and simple_slug != slug:
+        knowledge = load_test_knowledge(wiki_root, simple_slug)
+        if knowledge is not None:
+            return knowledge, simple_slug
+
+    knowledge_dir = _knowledge_dir(wiki_root)
+    if not knowledge_dir.is_dir():
+        return None, simple_slug or slug
+
+    search_normalized = _normalize_search_text(query)
+    search_tokens = _meaningful_search_tokens(query)
+    search_phrase = " ".join(search_tokens)
+    best_match: tuple[int, str] | None = None
+
+    for md_file in sorted(knowledge_dir.glob("test-*.md")):
+        try:
+            raw = md_file.read_text(encoding="utf-8")
+            doc = frontmatter.parse(raw)
+            fm = doc.frontmatter
+        except Exception:
+            continue
+
+        field_scores = [
+            (_normalize_search_text(str(fm.get("name", ""))), 4),
+            (_normalize_search_text(str(fm.get("test_slug", ""))), 3),
+            (
+                _normalize_search_text(
+                    str(
+                        fm.get("command_pattern")
+                        or fm.get("command_template", "")
+                    )
+                ),
+                2,
+            ),
+            (_normalize_search_text(str(fm.get("test_file_path", ""))), 2),
+        ]
+
+        score = 0
+        for field_value, field_weight in field_scores:
+            if not field_value:
+                continue
+            if search_phrase and search_phrase == field_value:
+                score = max(score, 100 + field_weight)
+            elif search_normalized and search_normalized == field_value:
+                score = max(score, 95 + field_weight)
+            elif search_phrase and search_phrase in field_value:
+                score = max(score, 80 + field_weight)
+            elif search_tokens and all(token in field_value for token in search_tokens):
+                score = max(score, 70 + field_weight)
+            elif search_tokens:
+                exact_token_hits = sum(
+                    1
+                    for token in search_tokens
+                    if token in field_value.split()
+                )
+                partial_token_hits = sum(
+                    1
+                    for token in search_tokens
+                    if token in field_value
+                )
+                if exact_token_hits > 0 or partial_token_hits > 0:
+                    score = max(
+                        score,
+                        exact_token_hits * 15
+                        + partial_token_hits * 5
+                        + field_weight,
+                    )
+
+        if score <= 0:
+            continue
+
+        match_slug = md_file.stem.removeprefix("test-")
+        if best_match is None or score > best_match[0]:
+            best_match = (score, match_slug)
+
+    if best_match is None:
+        return None, simple_slug or slug
+
+    matched_slug = best_match[1]
+    return load_test_knowledge(wiki_root, matched_slug), matched_slug
 
 
 def save_test_knowledge(

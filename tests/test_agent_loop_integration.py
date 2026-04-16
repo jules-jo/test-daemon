@@ -896,6 +896,45 @@ class TestBuildAgentSystemPrompt:
             assert "USER-CORRECTED COMMANDS" in prompt
             assert "Past Commands" in prompt
 
+    def test_includes_workflow_preflight_context(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """System prompt includes resolved workflow preflight guidance."""
+        config = RequestHandlerConfig(wiki_root=tmp_path)
+        handler = RequestHandler(config=config)
+
+        prompt = handler._build_agent_system_prompt(
+            target_host="host",
+            target_user="user",
+            target_port=22,
+            workflow_context={
+                "matched_test_slug": "lt-test",
+                "test_file_path": "/root/lt.py",
+                "workflow_steps": ["calibration", "lt-test"],
+                "prerequisite_steps": ["calibration"],
+                "artifact_states": [
+                    {
+                        "name": "/tmp/calibration.json",
+                        "status": "missing",
+                        "details": "Verified remote path is missing.",
+                    }
+                ],
+                "preflight": {
+                    "user_decision": "approved_prerequisites",
+                    "should_run_prerequisites": True,
+                },
+                "success_criteria": "LT summary reports zero failures.",
+                "failure_criteria": "Calibration fails or LT reports any failure.",
+            },
+        )
+
+        assert "Workflow Preflight" in prompt
+        assert "lt-test" in prompt
+        assert "/root/lt.py" in prompt
+        assert "calibration" in prompt
+        assert "approved running prerequisite steps" in prompt
+
 
 # ---------------------------------------------------------------------------
 # Backward compatibility: all existing verbs still work

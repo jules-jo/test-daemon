@@ -757,6 +757,49 @@ class TestRequestHandlerWorkflowIntegration:
             await handler._current_task
 
     @pytest.mark.asyncio
+    async def test_spawn_background_run_persists_artifact_states(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from jules_daemon.wiki.layout import initialize_wiki
+        from jules_daemon.workflows.models import ArtifactState, ArtifactStatus
+        from jules_daemon.workflows.store import read_workflow
+
+        initialize_wiki(tmp_path)
+        handler = RequestHandler(config=RequestHandlerConfig(wiki_root=tmp_path))
+
+        async def _fake_background_execute(**_: Any) -> None:
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(handler, "_background_execute", _fake_background_execute)
+
+        started = handler._spawn_background_run(
+            target_host="host.example.com",
+            target_user="deploy",
+            command="pytest -q",
+            workflow_request="run smoke tests",
+            artifact_states=(
+                ArtifactState(
+                    name="/tmp/calibration.json",
+                    status=ArtifactStatus.MISSING,
+                    details="Verified remote path is missing.",
+                ),
+            ),
+        )
+
+        workflow = read_workflow(tmp_path, started["workflow_id"])
+
+        assert workflow is not None
+        assert len(workflow.artifact_states) == 1
+        assert workflow.artifact_states[0].name == "/tmp/calibration.json"
+        assert workflow.artifact_states[0].status.value == "missing"
+
+        handler._current_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await handler._current_task
+
+    @pytest.mark.asyncio
     async def test_status_idle_includes_latest_workflow_snapshot(
         self,
         tmp_path: Path,
@@ -833,6 +876,82 @@ class TestRequestHandlerQueueVerb:
         assert response.payload["status"] == "enqueued"
         assert "queue_id" in response.payload
         assert "position" in response.payload
+
+
+class TestRequestHandlerWorkflowPreflight:
+    """Workflow-aware runs should ask preflight questions before agent routing."""
+
+    @pytest.mark.asyncio
+    async def test_run_with_workflow_preflight_passes_context_to_agent_loop(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from jules_daemon.wiki.test_knowledge import TestKnowledge, save_test_knowledge
+
+        handler = _make_llm_handler(tmp_path)
+        client = _make_client()
+        ask_reply = MessageEnvelope(
+            msg_type=MessageType.CONFIRM_REPLY,
+            msg_id="ask-workflow-001",
+            timestamp="2026-04-09T12:00:01Z",
+            payload={"approved": True, "answer": "yes"},
+        )
+        ask_frame = encode_frame(ask_reply)
+        client.reader.readexactly = AsyncMock(
+            side_effect=[ask_frame[:4], ask_frame[4:]]
+        )
+        save_test_knowledge(
+            tmp_path,
+            TestKnowledge(
+                test_slug="lt-test",
+                command_pattern="python3 /root/lt.py --target {target}",
+                workflow_steps=("calibration", "lt-test"),
+                prerequisites=("calibration",),
+                artifact_requirements=("calibration_file",),
+                success_criteria="LT summary reports zero failures.",
+                failure_criteria="Calibration fails or LT reports any failure.",
+            ),
+        )
+
+        expected = MessageEnvelope(
+            msg_type=MessageType.RESPONSE,
+            msg_id="req-001",
+            timestamp="2026-04-09T12:00:02Z",
+            payload={"status": "started", "mode": "agent_loop"},
+        )
+        handler._handle_run_agent_loop = AsyncMock(return_value=expected)  # type: ignore[method-assign]
+
+        response = await handler.handle_message(
+            _make_request(payload={
+                "verb": "run",
+                "target_host": "10.0.0.10",
+                "target_user": "root",
+                "natural_language": "run lt test",
+            }),
+            client,
+        )
+
+        assert response == expected
+        prompt_bytes = b"".join(
+            call.args[0] for call in client.writer.write.call_args_list
+        )
+        prompt_length = unpack_header(prompt_bytes[:HEADER_SIZE])
+        prompt = decode_envelope(
+            prompt_bytes[HEADER_SIZE:HEADER_SIZE + prompt_length]
+        )
+        assert prompt.payload["type"] == "question"
+        assert "could not verify required artifacts automatically" in (
+            prompt.payload["question"].lower()
+        )
+
+        run_args = handler._handle_run_agent_loop.await_args.args[1]
+        workflow_context = run_args["workflow_context"]
+        assert workflow_context["matched_test_slug"] == "lt-test"
+        assert workflow_context["workflow_steps"] == ["calibration", "lt-test"]
+        assert workflow_context["preflight"]["user_decision"] == (
+            "approved_prerequisites"
+        )
+        assert workflow_context["preflight"]["should_run_prerequisites"] is True
 
     @pytest.mark.asyncio
     async def test_queue_creates_wiki_file(self, tmp_path: Path) -> None:

@@ -81,6 +81,7 @@ def test_evaluate_workflow_preflight_ready_when_artifacts_present() -> None:
     assert decision.ready_to_run is True
     assert decision.requires_user_confirmation is False
     assert decision.missing_artifacts == ()
+    assert decision.unknown_artifacts == ()
     assert decision.question is None
 
 
@@ -102,6 +103,27 @@ def test_evaluate_workflow_preflight_asks_configured_prompt_when_missing() -> No
         decision.question.prompt
         == "There is no calibration file. Do you want me to run calibration first?"
     )
+
+
+def test_evaluate_workflow_preflight_asks_when_artifacts_are_unverified() -> None:
+    plan = resolve_test_workflow(
+        request_text="run lt test",
+        knowledge=_knowledge(when_missing_artifact_ask=""),
+    )
+    decision = evaluate_workflow_preflight(
+        plan=plan,
+        artifact_presence={},
+    )
+
+    assert decision.ready_to_run is False
+    assert decision.requires_user_confirmation is True
+    assert decision.missing_artifacts == ()
+    assert decision.unknown_artifacts == ("calibration_file",)
+    assert decision.question is not None
+    assert "could not verify required artifacts automatically" in (
+        decision.question.prompt.lower()
+    )
+    assert "run calibration first" in decision.question.prompt.lower()
 
 
 def test_evaluate_workflow_preflight_builds_generic_prompt_without_custom_one() -> None:

@@ -49,7 +49,7 @@ In a typical Windows local setup, that means:
 - `prerequisites`
   Prerequisite step or capability names that should be satisfied before the primary step.
 - `artifact_requirements`
-  Named artifacts that should exist before the primary step is ready.
+  Named artifacts that should exist before the primary step is ready. If you want Jules to verify an artifact automatically today, use an explicit remote path like `/tmp/calibration.json`.
 - `when_missing_artifact_ask`
   User-facing prompt to ask when one or more required artifacts are missing.
 - `success_criteria`
@@ -101,12 +101,14 @@ last_updated: '2026-04-16T00:00:00+00:00'
 - `status` test context now surfaces the workflow-aware fields when matching test knowledge exists.
 - `workflows.planner.resolve_test_workflow()` can build a deterministic plan from `workflow_steps`, `prerequisites`, and `artifact_requirements`.
 - `workflows.planner.evaluate_workflow_preflight()` can turn missing artifact facts into a deterministic user question.
+- The active natural-language run path now uses that planner before the agent loop starts.
+- `workflows.preflight.inspect_workflow_artifacts()` can probe explicit remote artifact paths over SSH and persist the resulting artifact states on the workflow record.
+- When artifact requirements are not explicit paths, Jules now keeps them as `unknown` and asks a more accurate preflight question instead of claiming they are definitely missing.
 
 ## What Is Not Wired Yet
 
-- automatic remote artifact probing
 - automatic prerequisite execution from the main run path
-- agent-loop prompt/tool changes that make workflow planning mandatory before execution
+- automatic multi-step advancement after a prerequisite background run finishes
 - workflow-driven notifications and composite summaries
 
 So this schema is now implemented and usable, but it is still groundwork for the later multi-step execution phases.
