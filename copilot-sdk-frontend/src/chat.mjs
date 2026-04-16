@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rl = readline.createInterface({ input, output });
+const DEFAULT_JULES_MCP_TIMEOUT_MS = 180_000;
 
 function denyNonMcpPermissions(request) {
   if (request.kind === "mcp") {
@@ -29,6 +30,10 @@ async function promptUserInput(request) {
 }
 
 function buildJulesServerConfig(repoRoot) {
+  const timeoutMs = Number.parseInt(
+    process.env.JULES_MCP_TIMEOUT_MS || `${DEFAULT_JULES_MCP_TIMEOUT_MS}`,
+    10,
+  );
   return {
     type: "local",
     command: process.env.JULES_MCP_COMMAND || path.join(repoRoot, ".venv", "bin", "python"),
@@ -41,6 +46,9 @@ function buildJulesServerConfig(repoRoot) {
     },
     cwd: repoRoot,
     tools: ["*"],
+    timeout: Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? timeoutMs
+      : DEFAULT_JULES_MCP_TIMEOUT_MS,
   };
 }
 

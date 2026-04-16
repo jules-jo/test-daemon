@@ -66,8 +66,17 @@ npm start
   - Optional override for the Python executable used to launch the MCP server
 - `JULES_MCP_ARGS`
   - Optional override for the MCP server launch args
+- `JULES_MCP_TIMEOUT_MS`
+  - Optional MCP tool timeout in milliseconds, default: `180000`
 
 ## Notes
 
 The frontend currently restricts Copilot tool permissions to MCP-only use.
 Local shell/write/url tools are denied so the session stays focused on Jules.
+
+If chat-style knowledge questions time out, increase the MCP timeout:
+
+```bash
+export JULES_MCP_TIMEOUT_MS=300000
+npm start
+```
