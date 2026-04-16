@@ -51,3 +51,6 @@ The legacy CLI front door is still present in code for fallback/reference, but t
 
 ## [2026-04-16] design | Added stateful workflow architecture for prerequisite-driven tests
 Added `wiki/pages/architecture/stateful-test-workflow-orchestration.md` to capture the next-step design target for more agentic Jules behavior. The page uses an `LT -> calibration -> LT summary` example to define a workflow-oriented state model, prerequisite reasoning, mid-run status answers, notification transitions, and future JIRA escalation after approval.
+
+## [2026-04-16] design | Clarified that workflow orchestration is generic, not LT-specific
+Updated `wiki/pages/architecture/stateful-test-workflow-orchestration.md` to make the intended scope explicit: LT is just one motivating example, while the actual architecture should support many different sequential test workflows through generic workflow templates, test knowledge, artifact checks, and step-specific parsers.

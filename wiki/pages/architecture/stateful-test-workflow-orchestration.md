@@ -23,7 +23,7 @@ sources:
 
 Jules should evolve from a single-command test runner into a stateful workflow agent that can reason about prerequisites, run multi-step test sequences, track progress, answer status questions mid-run, and summarize results in test-aware language.
 
-The motivating example is:
+The motivating example in this page is:
 
 1. User asks to run `lt test`.
 2. Agent notices the calibration artifact is missing.
@@ -34,6 +34,8 @@ The motivating example is:
 7. Agent can answer `what is the current status?` at any point.
 8. Agent interprets LT output into pass/fail plus a summary.
 9. Future: on failure, the agent drafts a JIRA and files it after user approval.
+
+The LT case is only an example. The target design is not LT-specific and should support many different tests and workflow templates over time. Jules should be able to handle one test workflow at a time per active conversation or run context, but it should not be limited to a single hard-coded test family.
 
 ## Why This Needs More Agentic Behavior
 
@@ -49,6 +51,13 @@ This flow requires more than command generation:
 
 This is a good fit for a more model-centric Jules, but it does not require a multi-agent core.
 
+The same reasoning pattern applies to many other tests:
+
+- smoke tests that require environment setup first
+- diagnostics that should run only when a preflight check fails
+- tests that need generated input artifacts before execution
+- tests that branch into different recovery or follow-up sequences depending on parsed output
+
 ## Recommended Architecture
 
 The recommended design is:
@@ -58,6 +67,8 @@ The recommended design is:
 3. One structured output-interpretation layer
 4. One notification/status layer
 5. Optional future escalation tools such as JIRA drafting
+
+This architecture should be generic across test families. Jules should not encode a single privileged workflow such as LT. Instead, it should load workflow behavior from test knowledge plus runtime observation.
 
 ### Orchestration agent
 
@@ -115,6 +126,7 @@ Suggested top-level fields:
 - `status`
 - `active_step`
 - `steps`
+- `workflow_template`
 - `artifact_state`
 - `latest_summary`
 - `final_outcome`
@@ -154,6 +166,16 @@ Each workflow step should carry:
 - `parsed_status`
 - `summary`
 
+### Sequential scope
+
+The intended scope is:
+
+- one active workflow at a time in the current conversational/run context
+- many different workflow templates across the product
+- no requirement for concurrent multi-test orchestration in the first version
+
+That means Jules should be able to run calibration-driven tests, smoke tests, diagnostics, and similar workflows sequentially without being architecturally limited to one specific named test.
+
 ### Artifact state
 
 For prerequisite-driven tests, Jules also needs a durable artifact view:
@@ -179,6 +201,7 @@ Suggested fields:
 - `artifact_requirements`
 - `preflight_checks`
 - `workflow_steps`
+- `workflow_kind`
 - `status_patterns`
 - `success_criteria`
 - `failure_criteria`
@@ -197,6 +220,8 @@ Conceptually:
 - LT failure may recommend JIRA drafting after user approval
 
 ## Execution Flow For The LT Example
+
+This section is illustrative only. The same workflow engine should support other prerequisite-driven tests by swapping in a different knowledge record and parser set.
 
 ### 1. Interpret request
 
@@ -337,6 +362,15 @@ Optional future sidecars:
 - follow-up test recommendation agent
 
 Those can be added later without making the core workflow depend on agent-to-agent coordination.
+
+## Generalization Requirement
+
+The design target should be phrased as:
+
+- Jules supports multiple test families and workflow templates
+- each test can define its own prerequisites, artifact checks, workflow steps, parsers, and summary rules
+- the orchestration engine is generic
+- the LT example is one acceptance scenario, not the definition of the product
 
 ## Implications For A More Model-Centric Jules
 
