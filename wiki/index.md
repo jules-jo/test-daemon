@@ -6,7 +6,7 @@ tags:
 - jules-daemon
 type: wiki-index
 created: 2026-04-13
-updated: 2026-04-14
+updated: 2026-04-16
 sources:
 - /workspaces/jules/experiments-codex/jules-agent-loop-rescope-codex/jules-agent-loop-rescope/AGENTS.md
 - /workspaces/jules/experiments-codex/jules-agent-loop-rescope-codex/jules-agent-loop-rescope/wiki/schema/AGENTS.md
@@ -29,6 +29,7 @@ Content-oriented catalog for the repo-local codebase wiki and the daemon's runti
 - [Phase 2.5 Alignment Checklist](pages/architecture/phase-2-5-alignment-checklist.md) -- concrete aligned versus partial versus not-yet-aligned comparison against the interview and scenario
 - [Phase 2.5 Implementation Backlog](pages/architecture/phase-2-5-implementation-backlog.md) -- prioritized follow-up work needed to close the remaining scenario gaps
 - [Agent-Driven Request Interpretation](pages/architecture/agent-driven-request-interpretation.md) -- implemented daemon-side interpretation path that keeps transport/safety deterministic while expanding agent-side handling for conversational prompts
+- [Stateful Test Workflow Orchestration](pages/architecture/stateful-test-workflow-orchestration.md) -- target architecture and state model for prerequisite-aware multi-step test workflows such as `LT -> calibration -> LT result summary`
 
 ## Concepts
 

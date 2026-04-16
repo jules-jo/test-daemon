@@ -5,7 +5,7 @@ tags:
 - jules-daemon
 type: wiki-log
 created: 2026-04-13
-updated: 2026-04-14
+updated: 2026-04-16
 ---
 
 # Wiki Log
@@ -48,3 +48,6 @@ Added `wiki/pages/architecture/agent-driven-request-interpretation.md` to captur
 
 ## [2026-04-14] implementation | Switched the active CLI path to daemon-side interpretation
 The legacy CLI front door is still present in code for fallback/reference, but the active `cli_main` flow now forwards nearly all user requests through a daemon-side `interpret` verb. The daemon uses the LLM intent classifier to map conversational prompts to structured verbs, retries once with a follow-up clarification question when confidence or validation is insufficient, and then dispatches into the existing `run` / `status` / `watch` / `cancel` / `history` / `discover` handlers.
+
+## [2026-04-16] design | Added stateful workflow architecture for prerequisite-driven tests
+Added `wiki/pages/architecture/stateful-test-workflow-orchestration.md` to capture the next-step design target for more agentic Jules behavior. The page uses an `LT -> calibration -> LT summary` example to define a workflow-oriented state model, prerequisite reasoning, mid-run status answers, notification transitions, and future JIRA escalation after approval.

@@ -6,7 +6,7 @@ tags:
 - agent-loop
 type: repo-overview
 created: 2026-04-13
-updated: 2026-04-14
+updated: 2026-04-16
 sources:
 - /workspaces/jules/experiments-codex/jules-agent-loop-rescope-codex/jules-agent-loop-rescope/pyproject.toml
 - /workspaces/jules/experiments-codex/jules-agent-loop-rescope-codex/jules-agent-loop-rescope/src/jules_daemon/__main__.py
@@ -74,6 +74,7 @@ The main daemon lifecycle starts in `src/jules_daemon/__main__.py`. It initializ
 - The default daemon startup path now instantiates a `NotificationBroadcaster`, and `notify_user` prefers broadcaster-backed delivery when subscribers exist.
 - Active-run watch/status/live-output paths now prefer `JobOutputBroadcaster` and default monitor detectors in `RequestHandler`; the older in-memory buffer/queue path remains as a fallback for completed runs and legacy watch behavior.
 - Current request interpretation is still front-door-heavy in the CLI. A planned design direction is to keep only a thin deterministic front door and move unresolved conversational run interpretation deeper into the daemon/agent loop while preserving deterministic target validation and approval enforcement.
+- A newer design direction is to model multi-step test workflows explicitly, so Jules can reason about prerequisites such as calibration, answer status queries mid-run, and summarize composite workflows rather than only single commands.
 
 ## Current Snapshot
 
@@ -94,4 +95,5 @@ The main daemon lifecycle starts in `src/jules_daemon/__main__.py`. It initializ
 - [Phase 2.5 Alignment Checklist](phase-2-5-alignment-checklist.md)
 - [Phase 2.5 Implementation Backlog](phase-2-5-implementation-backlog.md)
 - [Agent-Driven Request Interpretation](agent-driven-request-interpretation.md)
+- [Stateful Test Workflow Orchestration](stateful-test-workflow-orchestration.md)
 - [Project Wiki System](../concepts/project-wiki-system.md)
