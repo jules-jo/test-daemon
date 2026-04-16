@@ -207,6 +207,16 @@ DAEMON_MANAGED_DIRS: tuple[WikiDirectory, ...] = (
         kind=DirectoryKind.DAEMON_MANAGED,
         description="Per-test learned knowledge (one file per known test command)",
     ),
+    WikiDirectory(
+        relative_path="pages/daemon/workflows",
+        kind=DirectoryKind.DAEMON_MANAGED,
+        description="Workflow records for stateful multi-step test orchestration",
+    ),
+    WikiDirectory(
+        relative_path="pages/daemon/workflow-steps",
+        kind=DirectoryKind.DAEMON_MANAGED,
+        description="Per-step workflow state records keyed by workflow and step",
+    ),
 )
 
 USER_MANAGED_DIRS: tuple[WikiDirectory, ...] = (

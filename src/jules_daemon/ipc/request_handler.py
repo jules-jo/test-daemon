@@ -159,6 +159,17 @@ from jules_daemon.wiki.test_knowledge import (
     merge_knowledge,
     save_test_knowledge,
 )
+from jules_daemon.workflows.models import WorkflowRecord, WorkflowStepRecord
+from jules_daemon.workflows.status import (
+    build_latest_workflow_status,
+    build_workflow_status,
+)
+from jules_daemon.workflows.store import (
+    read_step as read_workflow_step,
+    read_workflow,
+    save_step as save_workflow_step,
+    save_workflow,
+)
 
 # Conditional LLM imports -- these are Optional and never crash the daemon.
 # The TYPE_CHECKING guard keeps the type annotations available to type
@@ -201,6 +212,7 @@ _STATUS_SUMMARY_FIELD_ORDER: tuple[str, ...] = (
     "incomplete",
 )
 _STATUS_ALERT_SUMMARY_MAX_RESULTS: int = 3
+_PRIMARY_WORKFLOW_STEP_ID = "primary-run"
 _DEFAULT_MONITOR_ERROR_PATTERNS: tuple[ErrorKeywordPattern, ...] = (
     ErrorKeywordPattern(
         name="oom",
@@ -2569,6 +2581,7 @@ class RequestHandler:
                 command=command,
                 target_port=target_port,
                 timeout=timeout,
+                workflow_request=natural_language,
             )
 
         def _live_output_provider(last_n: int) -> dict[str, Any]:
@@ -3532,6 +3545,7 @@ class RequestHandler:
             target_port=target_port,
             run_id=run_id,
             audit=audit,
+            workflow_request=natural_language,
         )
 
         # Step 6: Return "started" response immediately
@@ -3551,6 +3565,7 @@ class RequestHandler:
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
         run_id: str | None = None,
         audit: AuditRecord | None = None,
+        workflow_request: str | None = None,
     ) -> dict[str, Any]:
         """Start a daemon-managed background run and return its start payload."""
         current_task = asyncio.current_task()
@@ -3565,11 +3580,20 @@ class RequestHandler:
             )
 
         effective_run_id = run_id or f"run-{uuid.uuid4().hex[:12]}"
+        workflow_id = effective_run_id
 
         # Clear the previous completed run -- a new run is starting
         self._last_completed_run = None
         self._current_run_id = effective_run_id
         self._prepare_live_run_state(run_id=effective_run_id)
+        self._record_started_workflow(
+            workflow_id=workflow_id,
+            request_text=workflow_request or command,
+            run_id=effective_run_id,
+            target_host=target_host,
+            target_user=target_user,
+            command=command,
+        )
         self._current_task = asyncio.create_task(
             self._background_execute(
                 run_id=effective_run_id,
@@ -3586,6 +3610,7 @@ class RequestHandler:
         return {
             "status": "started",
             "run_id": effective_run_id,
+            "workflow_id": workflow_id,
             "target_host": target_host,
             "command": command,
             "message": "Test started. Use 'status' to check progress.",
@@ -4008,6 +4033,200 @@ class RequestHandler:
 
         return enrichment
 
+    def _workflow_last_output_line(self, result: RunResult) -> str:
+        """Extract the last meaningful output line for workflow summaries."""
+        combined_output = result.stdout or result.stderr or ""
+        lines = [
+            line.strip()
+            for line in combined_output.splitlines()
+            if line.strip()
+        ]
+        return lines[-1] if lines else ""
+
+    def _workflow_summary_for_result(self, result: RunResult) -> str:
+        """Build a compact workflow summary from a completed run result."""
+        if result.success:
+            if result.exit_code is not None:
+                return (
+                    f"Run completed successfully "
+                    f"(exit code {result.exit_code})."
+                )
+            return "Run completed successfully."
+        if result.error:
+            return result.error
+        if result.exit_code is not None:
+            return f"Run failed with exit code {result.exit_code}."
+        return "Run failed."
+
+    def _record_started_workflow(
+        self,
+        *,
+        workflow_id: str,
+        request_text: str,
+        run_id: str,
+        target_host: str,
+        target_user: str,
+        command: str,
+    ) -> None:
+        """Persist the initial running workflow + primary step snapshot."""
+        try:
+            workflow = read_workflow(self._config.wiki_root, workflow_id)
+            if workflow is None:
+                workflow = WorkflowRecord(
+                    workflow_id=workflow_id,
+                    request_text=request_text.strip() or command,
+                )
+            workflow = workflow.with_running(
+                current_step_id=_PRIMARY_WORKFLOW_STEP_ID,
+                run_id=run_id,
+                target_host=target_host,
+                target_user=target_user,
+            )
+            step = read_workflow_step(
+                self._config.wiki_root,
+                workflow_id,
+                _PRIMARY_WORKFLOW_STEP_ID,
+            )
+            if step is None:
+                step = WorkflowStepRecord(
+                    workflow_id=workflow_id,
+                    step_id=_PRIMARY_WORKFLOW_STEP_ID,
+                    name="primary run",
+                )
+            step = step.with_running(
+                run_id=run_id,
+                command=command,
+                target_host=target_host,
+                target_user=target_user,
+            )
+            save_workflow(self._config.wiki_root, workflow)
+            save_workflow_step(self._config.wiki_root, step)
+        except Exception as exc:
+            logger.warning(
+                "Failed to record started workflow %s: %s",
+                workflow_id,
+                exc,
+            )
+
+    def _record_completed_workflow(self, result: RunResult) -> None:
+        """Persist terminal workflow state from a completed run result."""
+        workflow_id = result.run_id
+        summary = self._workflow_summary_for_result(result)
+        last_output_line = self._workflow_last_output_line(result)
+        try:
+            workflow = read_workflow(self._config.wiki_root, workflow_id)
+            if workflow is None:
+                workflow = WorkflowRecord(
+                    workflow_id=workflow_id,
+                    request_text=result.command,
+                )
+                workflow = workflow.with_running(
+                    current_step_id=_PRIMARY_WORKFLOW_STEP_ID,
+                    run_id=result.run_id,
+                    target_host=result.target_host,
+                    target_user=result.target_user,
+                )
+            step = read_workflow_step(
+                self._config.wiki_root,
+                workflow_id,
+                _PRIMARY_WORKFLOW_STEP_ID,
+            )
+            if step is None:
+                step = WorkflowStepRecord(
+                    workflow_id=workflow_id,
+                    step_id=_PRIMARY_WORKFLOW_STEP_ID,
+                    name="primary run",
+                ).with_running(
+                    run_id=result.run_id,
+                    command=result.command,
+                    target_host=result.target_host,
+                    target_user=result.target_user,
+                )
+
+            if result.success:
+                workflow = workflow.with_completed_success(
+                    summary=summary,
+                    current_step_id=_PRIMARY_WORKFLOW_STEP_ID,
+                )
+                step = step.with_completed_success(
+                    summary=summary,
+                    last_output_line=last_output_line,
+                    exit_code=result.exit_code,
+                )
+            else:
+                workflow = workflow.with_completed_failure(
+                    error=result.error or summary,
+                    summary=summary,
+                    current_step_id=_PRIMARY_WORKFLOW_STEP_ID,
+                )
+                step = step.with_completed_failure(
+                    error=result.error or summary,
+                    summary=summary,
+                    last_output_line=last_output_line,
+                    exit_code=result.exit_code,
+                )
+            save_workflow(self._config.wiki_root, workflow)
+            save_workflow_step(self._config.wiki_root, step)
+        except Exception as exc:
+            logger.warning(
+                "Failed to record completed workflow %s: %s",
+                workflow_id,
+                exc,
+            )
+
+    def _record_cancelled_workflow(self, workflow_id: str) -> None:
+        """Persist a cancelled workflow state."""
+        try:
+            workflow = read_workflow(self._config.wiki_root, workflow_id)
+            if workflow is None:
+                return
+            step = read_workflow_step(
+                self._config.wiki_root,
+                workflow_id,
+                _PRIMARY_WORKFLOW_STEP_ID,
+            )
+            workflow = workflow.with_cancelled(
+                summary="Workflow cancelled by user.",
+                current_step_id=_PRIMARY_WORKFLOW_STEP_ID,
+            )
+            save_workflow(self._config.wiki_root, workflow)
+            if step is not None:
+                step = step.with_cancelled(
+                    summary="Workflow cancelled by user."
+                )
+                save_workflow_step(self._config.wiki_root, step)
+        except Exception as exc:
+            logger.warning(
+                "Failed to record cancelled workflow %s: %s",
+                workflow_id,
+                exc,
+            )
+
+    def _attach_workflow_status(
+        self,
+        extra: dict[str, Any],
+        *,
+        workflow_id: str | None = None,
+        latest: bool = False,
+    ) -> None:
+        """Attach workflow snapshot data to a status-like response."""
+        try:
+            snapshot = (
+                build_latest_workflow_status(self._config.wiki_root)
+                if latest
+                else (
+                    build_workflow_status(self._config.wiki_root, workflow_id)
+                    if workflow_id is not None
+                    else None
+                )
+            )
+        except Exception as exc:
+            logger.warning("Failed to build workflow status snapshot: %s", exc)
+            return
+
+        if snapshot is not None:
+            extra["workflow"] = snapshot
+
     async def _background_execute(
         self,
         *,
@@ -4157,6 +4376,8 @@ class RequestHandler:
                 target_user=target_user,
                 error=str(exc),
             )
+
+        self._record_completed_workflow(result)
 
         # Finalize the full-chain audit record with the SSH execution
         # and structured result stages, then persist to the wiki.
@@ -4572,6 +4793,7 @@ class RequestHandler:
             target_port=next_cmd.ssh_port,
             run_id=run_id,
             audit=queued_audit,
+            workflow_request=next_cmd.natural_language,
         )
 
     def _build_queued_audit(
@@ -4721,6 +4943,7 @@ class RequestHandler:
             extra.update(
                 self._build_status_alert_enrichment(run_id=last.run_id)
             )
+            self._attach_workflow_status(extra, workflow_id=last.run_id)
             return _build_success_response(
                 msg_id=msg_id,
                 verb="status",
@@ -4834,6 +5057,7 @@ class RequestHandler:
             extra.update(
                 self._build_status_alert_enrichment(run_id=wiki_run.run_id)
             )
+            self._attach_workflow_status(extra, workflow_id=wiki_run.run_id)
 
             return _build_success_response(
                 msg_id=msg_id,
@@ -4885,6 +5109,7 @@ class RequestHandler:
             extra.update(
                 self._build_status_alert_enrichment(run_id=wiki_run.run_id)
             )
+            self._attach_workflow_status(extra, workflow_id=wiki_run.run_id)
 
             return _build_success_response(
                 msg_id=msg_id,
@@ -4893,13 +5118,15 @@ class RequestHandler:
             )
 
         # No active run
+        extra = {
+            "state": "idle",
+            "queue_depth": queue_depth,
+        }
+        self._attach_workflow_status(extra, latest=True)
         return _build_success_response(
             msg_id=msg_id,
             verb="status",
-            extra={
-                "state": "idle",
-                "queue_depth": queue_depth,
-            },
+            extra=extra,
         )
 
     async def _handle_watch(
@@ -5115,6 +5342,9 @@ class RequestHandler:
                 "Failed to update wiki state to CANCELLED: %s", exc,
             )
 
+        if cancelled_run_id:
+            self._record_cancelled_workflow(cancelled_run_id)
+
         # Clear internal references
         self._current_task = None
         self._current_run_id = None
@@ -5127,6 +5357,7 @@ class RequestHandler:
             extra={
                 "status": "cancelled",
                 "run_id": cancelled_run_id,
+                "workflow_id": cancelled_run_id,
             },
         )
 

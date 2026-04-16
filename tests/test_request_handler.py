@@ -685,6 +685,100 @@ class TestRequestHandlerStatusVerb:
 
 
 # ---------------------------------------------------------------------------
+# RequestHandler: workflow integration
+# ---------------------------------------------------------------------------
+
+
+class TestRequestHandlerWorkflowIntegration:
+    """Tests for workflow persistence wired into run/status flows."""
+
+    @pytest.mark.asyncio
+    async def test_spawn_background_run_creates_workflow_records(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from jules_daemon.wiki.layout import initialize_wiki
+        from jules_daemon.workflows.store import read_step, read_workflow
+
+        initialize_wiki(tmp_path)
+        handler = RequestHandler(config=RequestHandlerConfig(wiki_root=tmp_path))
+
+        async def _fake_background_execute(**_: Any) -> None:
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(handler, "_background_execute", _fake_background_execute)
+
+        started = handler._spawn_background_run(
+            target_host="host.example.com",
+            target_user="deploy",
+            command="pytest -q",
+            workflow_request="run smoke tests",
+        )
+
+        workflow = read_workflow(tmp_path, started["workflow_id"])
+        step = read_step(tmp_path, started["workflow_id"], "primary-run")
+
+        assert started["workflow_id"] == started["run_id"]
+        assert workflow is not None
+        assert workflow.request_text == "run smoke tests"
+        assert workflow.status.value == "running"
+        assert step is not None
+        assert step.command == "pytest -q"
+        assert step.status.value == "running"
+
+        handler._current_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await handler._current_task
+
+    @pytest.mark.asyncio
+    async def test_status_idle_includes_latest_workflow_snapshot(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from jules_daemon.wiki.layout import initialize_wiki
+        from jules_daemon.workflows.models import WorkflowRecord, WorkflowStepRecord
+        from jules_daemon.workflows.store import save_step, save_workflow
+
+        initialize_wiki(tmp_path)
+        save_workflow(
+            tmp_path,
+            WorkflowRecord(
+                workflow_id="run-finished-1",
+                request_text="run lt test",
+            ).with_completed_success(
+                summary="Run completed successfully.",
+                current_step_id="primary-run",
+            ),
+        )
+        save_step(
+            tmp_path,
+            WorkflowStepRecord(
+                workflow_id="run-finished-1",
+                step_id="primary-run",
+                name="primary run",
+            ).with_completed_success(
+                summary="Run completed successfully.",
+                exit_code=0,
+            ),
+        )
+
+        handler = RequestHandler(config=RequestHandlerConfig(wiki_root=tmp_path))
+        client = _make_client()
+        envelope = _make_request(payload={"verb": "status"})
+
+        response = await handler.handle_message(envelope, client)
+
+        assert response.msg_type == MessageType.RESPONSE
+        assert response.payload["state"] == "idle"
+        assert response.payload["workflow"]["workflow_id"] == "run-finished-1"
+        assert response.payload["workflow"]["status"] == "completed_success"
+        assert response.payload["workflow"]["active_step"]["status"] == (
+            "completed_success"
+        )
+
+
+# ---------------------------------------------------------------------------
 # RequestHandler: valid queue request with enqueue confirmation
 # ---------------------------------------------------------------------------
 

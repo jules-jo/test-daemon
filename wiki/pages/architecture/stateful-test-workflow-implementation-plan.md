@@ -33,6 +33,31 @@ The target is:
 
 This plan assumes the current daemon-backed codebase as the starting point. It does not require immediate daemon removal. A more model-centric or daemonless version can be built later on the same workflow primitives.
 
+## Current Implementation Status
+
+As of 2026-04-16, the Phase 1 foundation is now implemented in code:
+
+- `src/jules_daemon/workflows/models.py`
+- `src/jules_daemon/workflows/store.py`
+- `src/jules_daemon/workflows/status.py`
+- `src/jules_daemon/ipc/request_handler.py`
+- `src/jules_daemon/wiki/layout.py`
+
+What exists now:
+
+- wiki-backed `WorkflowRecord` and `WorkflowStepRecord` persistence
+- daemon-managed `pages/daemon/workflows/` and `pages/daemon/workflow-steps/`
+- one workflow per launched run with a single `primary-run` step
+- workflow-aware `status` output, including latest persisted workflow state
+
+What still remains for later phases:
+
+- prerequisite-aware planning
+- artifact checks
+- multi-step advancement
+- step-specific interpreters
+- workflow-driven notifications
+
 ## Scope
 
 ### In scope
@@ -433,6 +458,10 @@ Done when:
 
 - a workflow can be created and updated independently of the current single-run state
 - `status` can return workflow-aware output for a mocked workflow
+
+Status:
+
+- implemented on 2026-04-16 as the first workflow foundation slice
 
 ### Phase 2: Knowledge schema and planner
 

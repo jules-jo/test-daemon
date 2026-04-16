@@ -139,6 +139,14 @@ class TestWikiLayoutConstants:
         paths = {d.relative_path for d in DAEMON_MANAGED_DIRS}
         assert "pages/daemon/queue" in paths
 
+    def test_daemon_dirs_include_workflows(self) -> None:
+        paths = {d.relative_path for d in DAEMON_MANAGED_DIRS}
+        assert "pages/daemon/workflows" in paths
+
+    def test_daemon_dirs_include_workflow_steps(self) -> None:
+        paths = {d.relative_path for d in DAEMON_MANAGED_DIRS}
+        assert "pages/daemon/workflow-steps" in paths
+
     def test_user_dirs_include_concepts(self) -> None:
         paths = {d.relative_path for d in USER_MANAGED_DIRS}
         assert "pages/concepts" in paths

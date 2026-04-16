@@ -57,3 +57,6 @@ Updated `wiki/pages/architecture/stateful-test-workflow-orchestration.md` to mak
 
 ## [2026-04-16] planning | Added concrete implementation plan for stateful test workflows
 Added `wiki/pages/architecture/stateful-test-workflow-implementation-plan.md` to convert the workflow architecture note into an executable plan. The new page defines the core records, services, tool/runtime primitives, suggested module boundaries, knowledge-schema additions, phased delivery sequence, and acceptance scenarios for generic prerequisite-aware test workflows.
+
+## [2026-04-16] implementation | Added Phase 1 workflow state foundation
+Implemented the first workflow slice in code: new workflow models, a wiki-backed workflow/step store, a read-side workflow status service, and request-handler integration that creates one workflow per launched run, updates it on completion or cancellation, and exposes workflow snapshots through `status`.
