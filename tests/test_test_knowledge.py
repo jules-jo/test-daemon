@@ -272,14 +272,14 @@ class TestPromptContext:
             summary_fields=("passed", "failed"),
             normal_behavior="Completes in under 30s with all PASSED",
             required_args=("iterations", "host"),
-            workflow_steps=("calibration", "lt_test"),
-            prerequisites=("calibration",),
-            artifact_requirements=("calibration_file",),
+            workflow_steps=("setup-step", "main_check"),
+            prerequisites=("setup-step",),
+            artifact_requirements=("setup_ready_file",),
             when_missing_artifact_ask=(
-                "There is no calibration file. Do you want me to run calibration first?"
+                "There is no setup file. Do you want me to run the setup step first?"
             ),
-            success_criteria="LT summary reports zero failures.",
-            failure_criteria="Calibration step fails or LT reports any failure.",
+            success_criteria="Main-check summary reports zero failures.",
+            failure_criteria="Setup step fails or main check reports any failure.",
             common_failures=("timeout", "connection refused"),
             runs_observed=4,
         )
@@ -333,12 +333,12 @@ class TestLoadAndSave:
             purpose="run the agent",
             output_format="iteration N: PASSED|FAILED",
             summary_fields=("passed", "failed"),
-            workflow_steps=("calibration", "lt_test"),
-            prerequisites=("calibration",),
-            artifact_requirements=("calibration_file",),
-            when_missing_artifact_ask="Run calibration first?",
-            success_criteria="LT passes.",
-            failure_criteria="LT fails.",
+            workflow_steps=("setup-step", "main_check"),
+            prerequisites=("setup-step",),
+            artifact_requirements=("setup_ready_file",),
+            when_missing_artifact_ask="Run setup first?",
+            success_criteria="Main check passes.",
+            failure_criteria="Main check fails.",
         )
         path = save_test_knowledge(wiki_root, k)
         raw = path.read_text(encoding="utf-8")
@@ -348,15 +348,15 @@ class TestLoadAndSave:
         assert doc.frontmatter.get("purpose") == "run the agent"
         assert doc.frontmatter.get("summary_fields") == ["passed", "failed"]
         assert doc.frontmatter.get("workflow_steps") == [
-            "calibration",
-            "lt_test",
+            "setup-step",
+            "main_check",
         ]
-        assert doc.frontmatter.get("prerequisites") == ["calibration"]
+        assert doc.frontmatter.get("prerequisites") == ["setup-step"]
         assert doc.frontmatter.get("artifact_requirements") == [
-            "calibration_file"
+            "setup_ready_file"
         ]
         assert doc.frontmatter.get("when_missing_artifact_ask") == (
-            "Run calibration first?"
+            "Run setup first?"
         )
 
     def test_round_trip_preserves_fields(self, wiki_root: Path) -> None:
@@ -368,12 +368,12 @@ class TestLoadAndSave:
             summary_fields=("passed", "failed"),
             normal_behavior="All iterations PASSED",
             required_args=("iterations",),
-            workflow_steps=("calibration", "lt_test"),
-            prerequisites=("calibration",),
-            artifact_requirements=("calibration_file",),
-            when_missing_artifact_ask="Run calibration first?",
-            success_criteria="LT passes.",
-            failure_criteria="LT fails.",
+            workflow_steps=("setup-step", "main_check"),
+            prerequisites=("setup-step",),
+            artifact_requirements=("setup_ready_file",),
+            when_missing_artifact_ask="Run setup first?",
+            success_criteria="Main check passes.",
+            failure_criteria="Main check fails.",
             common_failures=("timeout", "ConnectionError"),
             runs_observed=3,
         )
@@ -478,12 +478,12 @@ class TestMergeKnowledge:
             "output_format": "iteration logs",
             "summary_fields": ["passed", "failed"],
             "normal_behavior": "all PASSED",
-            "workflow_steps": ["calibration", "lt_test"],
-            "prerequisites": ["calibration"],
-            "artifact_requirements": ["calibration_file"],
-            "when_missing_artifact_ask": "Run calibration first?",
-            "success_criteria": "LT passes.",
-            "failure_criteria": "LT fails.",
+            "workflow_steps": ["setup-step", "main_check"],
+            "prerequisites": ["setup-step"],
+            "artifact_requirements": ["setup_ready_file"],
+            "when_missing_artifact_ask": "Run setup first?",
+            "success_criteria": "Main check passes.",
+            "failure_criteria": "Main check fails.",
             "common_failures": ["timeout"],
         }
         merged = merge_knowledge(
@@ -496,12 +496,12 @@ class TestMergeKnowledge:
         assert merged.output_format == "iteration logs"
         assert merged.summary_fields == ("passed", "failed")
         assert merged.normal_behavior == "all PASSED"
-        assert merged.workflow_steps == ("calibration", "lt_test")
-        assert merged.prerequisites == ("calibration",)
-        assert merged.artifact_requirements == ("calibration_file",)
-        assert merged.when_missing_artifact_ask == "Run calibration first?"
-        assert merged.success_criteria == "LT passes."
-        assert merged.failure_criteria == "LT fails."
+        assert merged.workflow_steps == ("setup-step", "main_check")
+        assert merged.prerequisites == ("setup-step",)
+        assert merged.artifact_requirements == ("setup_ready_file",)
+        assert merged.when_missing_artifact_ask == "Run setup first?"
+        assert merged.success_criteria == "Main check passes."
+        assert merged.failure_criteria == "Main check fails."
         assert merged.common_failures == ("timeout",)
         assert merged.runs_observed == 1
 
@@ -539,12 +539,12 @@ class TestMergeKnowledge:
 
     def test_existing_workflow_fields_are_preserved(self) -> None:
         existing = _make_knowledge(
-            workflow_steps=("calibration", "lt_test"),
-            prerequisites=("calibration",),
-            artifact_requirements=("calibration_file",),
-            when_missing_artifact_ask="Run calibration first?",
-            success_criteria="LT passes.",
-            failure_criteria="LT fails.",
+            workflow_steps=("setup-step", "main_check"),
+            prerequisites=("setup-step",),
+            artifact_requirements=("setup_ready_file",),
+            when_missing_artifact_ask="Run setup first?",
+            success_criteria="Main check passes.",
+            failure_criteria="Main check fails.",
             runs_observed=2,
         )
         merged = merge_knowledge(
@@ -558,12 +558,12 @@ class TestMergeKnowledge:
                 "failure_criteria": "Other failure",
             },
         )
-        assert merged.workflow_steps == ("calibration", "lt_test")
-        assert merged.prerequisites == ("calibration",)
-        assert merged.artifact_requirements == ("calibration_file",)
-        assert merged.when_missing_artifact_ask == "Run calibration first?"
-        assert merged.success_criteria == "LT passes."
-        assert merged.failure_criteria == "LT fails."
+        assert merged.workflow_steps == ("setup-step", "main_check")
+        assert merged.prerequisites == ("setup-step",)
+        assert merged.artifact_requirements == ("setup_ready_file",)
+        assert merged.when_missing_artifact_ask == "Run setup first?"
+        assert merged.success_criteria == "Main check passes."
+        assert merged.failure_criteria == "Main check fails."
 
     def test_empty_existing_summary_fields_adopts_new(self) -> None:
         existing = _make_knowledge(summary_fields=(), runs_observed=2)

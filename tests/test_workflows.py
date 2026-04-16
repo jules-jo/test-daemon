@@ -22,7 +22,7 @@ def test_workflow_round_trip(tmp_path) -> None:
     initialize_wiki(tmp_path)
     workflow = WorkflowRecord(
         workflow_id="run-abc123",
-        request_text="run lt test",
+        request_text="run main check",
     ).with_running(
         current_step_id="primary-run",
         run_id="run-abc123",
@@ -48,7 +48,7 @@ def test_workflow_round_trip(tmp_path) -> None:
 
     assert loaded_workflow is not None
     assert loaded_workflow.status.value == "running"
-    assert loaded_workflow.request_text == "run lt test"
+    assert loaded_workflow.request_text == "run main check"
     assert loaded_step is not None
     assert loaded_step.command == "python3 step.py --target 5"
     assert loaded_step.status.value == "running"

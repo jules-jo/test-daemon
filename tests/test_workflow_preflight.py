@@ -19,11 +19,11 @@ class TestInspectWorkflowArtifacts:
             host="10.0.0.10",
             port=22,
             username="root",
-            artifact_requirements=("calibration_file",),
+            artifact_requirements=("setup_ready_file",),
         )
 
         assert len(states) == 1
-        assert states[0].name == "calibration_file"
+        assert states[0].name == "setup_ready_file"
         assert states[0].status is ArtifactStatus.UNKNOWN
         assert "cannot verify" in (states[0].details or "").lower()
 
@@ -32,7 +32,7 @@ class TestInspectWorkflowArtifacts:
         with patch(
             "jules_daemon.workflows.preflight._probe_artifact_paths_via_ssh",
             return_value={
-                "/tmp/calibration.json": ArtifactStatus.MISSING,
+                "/tmp/setup-ready.flag": ArtifactStatus.MISSING,
                 "/tmp/existing.txt": ArtifactStatus.PRESENT,
             },
         ) as mock_probe:
@@ -41,12 +41,12 @@ class TestInspectWorkflowArtifacts:
                 port=22,
                 username="root",
                 artifact_requirements=(
-                    "/tmp/calibration.json",
+                    "/tmp/setup-ready.flag",
                     "/tmp/existing.txt",
                 ),
             )
 
         mock_probe.assert_called_once()
         by_name = {state.name: state for state in states}
-        assert by_name["/tmp/calibration.json"].status is ArtifactStatus.MISSING
+        assert by_name["/tmp/setup-ready.flag"].status is ArtifactStatus.MISSING
         assert by_name["/tmp/existing.txt"].status is ArtifactStatus.PRESENT

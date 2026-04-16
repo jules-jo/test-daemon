@@ -909,13 +909,13 @@ class TestBuildAgentSystemPrompt:
             target_user="user",
             target_port=22,
             workflow_context={
-                "matched_test_slug": "lt-test",
-                "test_file_path": "/root/lt.py",
-                "workflow_steps": ["calibration", "lt-test"],
-                "prerequisite_steps": ["calibration"],
+                "matched_test_slug": "main-check",
+                "test_file_path": "/root/main_check.py",
+                "workflow_steps": ["setup-step", "main-check"],
+                "prerequisite_steps": ["setup-step"],
                 "artifact_states": [
                     {
-                        "name": "/tmp/calibration.json",
+                        "name": "/tmp/setup-ready.flag",
                         "status": "missing",
                         "details": "Verified remote path is missing.",
                     }
@@ -924,15 +924,15 @@ class TestBuildAgentSystemPrompt:
                     "user_decision": "approved_prerequisites",
                     "should_run_prerequisites": True,
                 },
-                "success_criteria": "LT summary reports zero failures.",
-                "failure_criteria": "Calibration fails or LT reports any failure.",
+                "success_criteria": "Main-check summary reports zero failures.",
+                "failure_criteria": "Setup step fails or main check reports any failure.",
             },
         )
 
         assert "Workflow Preflight" in prompt
-        assert "lt-test" in prompt
-        assert "/root/lt.py" in prompt
-        assert "calibration" in prompt
+        assert "main-check" in prompt
+        assert "/root/main_check.py" in prompt
+        assert "setup-step" in prompt
         assert "approved running prerequisite steps" in prompt
 
 

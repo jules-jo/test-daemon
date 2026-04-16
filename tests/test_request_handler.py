@@ -784,10 +784,10 @@ class TestRequestHandlerWorkflowIntegration:
             target_host="host.example.com",
             target_user="deploy",
             command="pytest -q",
-            workflow_request="run smoke tests",
+            workflow_request="run main check",
             artifact_states=(
                 ArtifactState(
-                    name="/tmp/calibration.json",
+                    name="/tmp/setup-ready.flag",
                     status=ArtifactStatus.MISSING,
                     details="Verified remote path is missing.",
                 ),
@@ -798,7 +798,7 @@ class TestRequestHandlerWorkflowIntegration:
 
         assert workflow is not None
         assert len(workflow.artifact_states) == 1
-        assert workflow.artifact_states[0].name == "/tmp/calibration.json"
+        assert workflow.artifact_states[0].name == "/tmp/setup-ready.flag"
         assert workflow.artifact_states[0].status.value == "missing"
 
         handler._current_task.cancel()
@@ -819,7 +819,7 @@ class TestRequestHandlerWorkflowIntegration:
             tmp_path,
             WorkflowRecord(
                 workflow_id="run-finished-1",
-                request_text="run lt test",
+                request_text="run main check",
             ).with_completed_success(
                 summary="Run completed successfully.",
                 current_step_id="primary-run",
@@ -909,13 +909,13 @@ class TestRequestHandlerWorkflowPreflight:
         save_test_knowledge(
             tmp_path,
             TestKnowledge(
-                test_slug="lt-test",
-                command_pattern="python3 /root/lt.py --target {target}",
-                workflow_steps=("calibration", "lt-test"),
-                prerequisites=("calibration",),
-                artifact_requirements=("calibration_file",),
-                success_criteria="LT summary reports zero failures.",
-                failure_criteria="Calibration fails or LT reports any failure.",
+                test_slug="main-check",
+                command_pattern="python3 /root/main_check.py --target {target}",
+                workflow_steps=("setup-step", "main-check"),
+                prerequisites=("setup-step",),
+                artifact_requirements=("setup_ready_file",),
+                success_criteria="Main check summary reports zero failures.",
+                failure_criteria="Setup step fails or main check reports any failure.",
             ),
         )
 
@@ -932,7 +932,7 @@ class TestRequestHandlerWorkflowPreflight:
                 "verb": "run",
                 "target_host": "10.0.0.10",
                 "target_user": "root",
-                "natural_language": "run lt test",
+                "natural_language": "run main check",
             }),
             client,
         )
@@ -952,8 +952,8 @@ class TestRequestHandlerWorkflowPreflight:
 
         run_args = handler._handle_run_agent_loop.await_args.args[1]
         workflow_context = run_args["workflow_context"]
-        assert workflow_context["matched_test_slug"] == "lt-test"
-        assert workflow_context["workflow_steps"] == ["calibration", "lt-test"]
+        assert workflow_context["matched_test_slug"] == "main-check"
+        assert workflow_context["workflow_steps"] == ["setup-step", "main-check"]
         assert workflow_context["preflight"]["user_decision"] == (
             "declined_prerequisites"
         )
@@ -1018,21 +1018,21 @@ class TestRequestHandlerWorkflowExecution:
         save_test_knowledge(
             tmp_path,
             TestKnowledge(
-                test_slug="lt-test",
-                command_pattern="python3 /root/lt.py --target {target}",
+                test_slug="main-check",
+                command_pattern="python3 /root/main_check.py --target {target}",
                 required_args=("target",),
-                workflow_steps=("calibration", "lt-test"),
-                prerequisites=("calibration",),
-                artifact_requirements=("calibration_file",),
-                success_criteria="LT summary reports zero failures.",
-                failure_criteria="Calibration fails or LT reports any failure.",
+                workflow_steps=("setup-step", "main-check"),
+                prerequisites=("setup-step",),
+                artifact_requirements=("setup_ready_file",),
+                success_criteria="Main check summary reports zero failures.",
+                failure_criteria="Setup step fails or main check reports any failure.",
             ),
         )
         save_test_knowledge(
             tmp_path,
             TestKnowledge(
-                test_slug="calibration",
-                command_pattern="python3 /root/calibration.py",
+                test_slug="setup-step",
+                command_pattern="python3 /root/setup_step.py",
             ),
         )
 
@@ -1070,7 +1070,7 @@ class TestRequestHandlerWorkflowExecution:
                 "verb": "run",
                 "target_host": "10.0.0.10",
                 "target_user": "root",
-                "natural_language": "run lt test",
+                "natural_language": "run main check",
             }),
             client,
         )
@@ -1080,16 +1080,16 @@ class TestRequestHandlerWorkflowExecution:
         assert response.payload["mode"] == "workflow"
         assert response.payload["workflow_id"].startswith("run-")
         assert [step["name"] for step in response.payload["workflow_steps"]] == [
-            "calibration",
-            "lt-test",
+            "setup-step",
+            "main-check",
         ]
 
         assert handler._current_task is not None
         await handler._current_task
 
         assert executed_commands == [
-            "python3 /root/calibration.py",
-            "python3 /root/lt.py --target 5",
+            "python3 /root/setup_step.py",
+            "python3 /root/main_check.py --target 5",
         ]
 
         workflow_snapshot = build_workflow_status(
@@ -1126,27 +1126,27 @@ class TestRequestHandlerWorkflowExecution:
         handler = RequestHandler(config=RequestHandlerConfig(wiki_root=tmp_path))
         plan = WorkflowExecutionPlan(
             workflow_id="run-workflow-123",
-            request_text="run lt test",
+            request_text="run main check",
             target_host="10.0.0.10",
             target_user="root",
             target_port=22,
             steps=(
                 WorkflowExecutionStep(
-                    step_id="step-01-calibration",
-                    step_name="calibration",
+                    step_id="step-01-setup-step",
+                    step_name="setup-step",
                     phase="prerequisite",
-                    test_slug="calibration",
-                    command="python3 /root/calibration.py",
-                    command_pattern="python3 /root/calibration.py",
+                    test_slug="setup-step",
+                    command="python3 /root/setup_step.py",
+                    command_pattern="python3 /root/setup_step.py",
                     required_args=(),
                 ),
                 WorkflowExecutionStep(
-                    step_id="step-02-lt-test",
-                    step_name="lt-test",
+                    step_id="step-02-main-check",
+                    step_name="main-check",
                     phase="main",
-                    test_slug="lt-test",
-                    command="python3 /root/lt.py --target 5",
-                    command_pattern="python3 /root/lt.py --target {target}",
+                    test_slug="main-check",
+                    command="python3 /root/main_check.py --target 5",
+                    command_pattern="python3 /root/main_check.py --target {target}",
                     required_args=("target",),
                 ),
             ),

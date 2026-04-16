@@ -177,12 +177,12 @@ class TestWikiDelegation:
         _save_knowledge(
             wiki_root,
             required_args=("iterations", "host"),
-            workflow_steps=("calibration", "lt_test"),
-            prerequisites=("calibration",),
-            artifact_requirements=("calibration_file",),
-            when_missing_artifact_ask="Run calibration first?",
-            success_criteria="LT passes.",
-            failure_criteria="LT fails.",
+            workflow_steps=("setup-step", "main_check"),
+            prerequisites=("setup-step",),
+            artifact_requirements=("setup_ready_file",),
+            when_missing_artifact_ask="Run setup first?",
+            success_criteria="Main check passes.",
+            failure_criteria="Main check fails.",
         )
 
         result = await tool.execute(
@@ -207,12 +207,12 @@ class TestWikiDelegation:
         assert "timeout on large inputs" in data["common_failures"]
         assert data["normal_behavior"] == "All iterations pass"
         assert data["required_args"] == ["iterations", "host"]
-        assert data["workflow_steps"] == ["calibration", "lt_test"]
-        assert data["prerequisites"] == ["calibration"]
-        assert data["artifact_requirements"] == ["calibration_file"]
-        assert data["when_missing_artifact_ask"] == "Run calibration first?"
-        assert data["success_criteria"] == "LT passes."
-        assert data["failure_criteria"] == "LT fails."
+        assert data["workflow_steps"] == ["setup-step", "main_check"]
+        assert data["prerequisites"] == ["setup-step"]
+        assert data["artifact_requirements"] == ["setup_ready_file"]
+        assert data["when_missing_artifact_ask"] == "Run setup first?"
+        assert data["success_criteria"] == "Main check passes."
+        assert data["failure_criteria"] == "Main check fails."
         assert data["runs_observed"] == 10
 
     @pytest.mark.asyncio

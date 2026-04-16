@@ -49,7 +49,7 @@ In a typical Windows local setup, that means:
 - `prerequisites`
   Prerequisite step or capability names that should be satisfied before the primary step.
 - `artifact_requirements`
-  Named artifacts that should exist before the primary step is ready. If you want Jules to verify an artifact automatically today, use an explicit remote path like `/tmp/calibration.json`.
+  Named artifacts that should exist before the primary step is ready. If you want Jules to verify an artifact automatically today, use an explicit remote path like `/tmp/setup-ready.flag`.
 - `when_missing_artifact_ask`
   User-facing prompt to ask when one or more required artifacts are missing.
 - `success_criteria`
@@ -66,10 +66,10 @@ tags:
   - test-knowledge
   - learning
 type: test-knowledge
-test_slug: lt-test
-command_pattern: python3 /root/lt.py --target {target}
-test_file_path: /root/lt.py
-purpose: Runs the LT validation flow.
+test_slug: main-check
+command_pattern: python3 /root/main_check.py --target {target}
+test_file_path: /root/main_check.py
+purpose: Runs the main validation flow.
 output_format: Progress lines plus a final pass/fail summary.
 summary_fields:
   - passed
@@ -77,17 +77,17 @@ summary_fields:
 required_args:
   - target
 workflow_steps:
-  - calibration
-  - lt_test
+  - setup-step
+  - main_check
 prerequisites:
-  - calibration
+  - setup-step
 artifact_requirements:
-  - calibration_file
-when_missing_artifact_ask: There is no calibration file. Do you want me to run calibration first?
-success_criteria: LT summary reports zero failures.
-failure_criteria: Calibration fails or LT reports any failure.
+  - setup_ready_file
+when_missing_artifact_ask: There is no setup file. Do you want me to run the setup step first?
+success_criteria: Main-check summary reports zero failures.
+failure_criteria: Setup step fails or the main check reports any failure.
 common_failures:
-  - calibration file missing
+  - setup file missing
   - timeout waiting for device
 runs_observed: 0
 last_updated: '2026-04-16T00:00:00+00:00'
@@ -107,8 +107,7 @@ last_updated: '2026-04-16T00:00:00+00:00'
 
 ## What Is Not Wired Yet
 
-- automatic prerequisite execution from the main run path
-- automatic multi-step advancement after a prerequisite background run finishes
+- step-specific output interpretation for each workflow step
 - workflow-driven notifications and composite summaries
 
-So this schema is now implemented and usable, but it is still groundwork for the later multi-step execution phases.
+So this schema is now implemented and usable. Jules can already execute the first deterministic multi-step slice from it, but richer interpretation and notification behavior still sit in later phases.
